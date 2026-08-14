@@ -32,6 +32,13 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
+| `VISION_LLM_ENDPOINT` | for visual QA | — | OpenAI Responses-API endpoint of a vision model, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. Unset → `visual_inspect_presentation` returns a clear error |
+| `VISION_LLM_API_KEY` | for visual QA | — | Key for that endpoint (sent as `api-key` and `Authorization: Bearer`) |
+| `VISION_LLM_MODEL` | for visual QA | — | Model / Azure deployment name; must accept image input |
+| `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per inspection |
+| `SOFFICE_PATH` | no | `soffice` on PATH | LibreOffice binary used to render slides (the Docker image includes LibreOffice) |
+
+Copy [`.env.example`](.env.example) to `.env` for local runs — the server loads it at startup, and `.env` is gitignored.
 
 ## Running
 
@@ -78,6 +85,12 @@ Register the deployed server as an MCP tool set in your Quick App manifest:
 - `propagate_types_to_choice` makes the exported `.pptx` attachment visible to the end user in DIAL Chat (tool-call results are hidden by default).
 - **Template input**: the orchestrating agent passes the template to `create_presentation_from_template_content` as `file:data::files/{bucket}/{path}` — Quick Apps' file preprocessing resolves that reference to a data: URI before this server receives it (base64 via `file:base64::` also accepted). Note Quick Apps' default 10 MiB file-loading limit (`features.file_loading.size_limit`) if your templates are large.
 - **Deck output**: `export_presentation` uploads to DIAL file storage and returns the `files/{bucket}/{path}` URL; the tool description instructs the agent to include it in its final answer.
+
+## Visual inspection loop
+
+`visual_inspect_presentation` renders every slide (LibreOffice → PDF → PNG) and sends the images to the configured vision LLM, which reviews them for template/brand fidelity and visible errors (overflowing or clipped text, overlaps, unfilled placeholders, broken charts, illegibility). It returns `{"passed": bool, "issues": [{slide, severity, description, suggested_fix}]}`, and its description instructs the orchestrating agent to **fix the issues and re-inspect in a loop until `passed` is true** before exporting. Optionally pass `reference_presentation_id` (e.g. the original template opened as its own presentation) so the reviewer sees the reference slides alongside the deck.
+
+Any endpoint speaking the OpenAI Responses API with image input works (Azure OpenAI included) — configure `VISION_LLM_ENDPOINT` / `VISION_LLM_API_KEY` / `VISION_LLM_MODEL`. When unconfigured, or when LibreOffice is absent, the tool degrades to a clear error and everything else keeps working.
 
 ## Multi-tenancy and scaling notes
 

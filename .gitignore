@@ -18,3 +18,6 @@ __pycache__/
 # Local test templates and spike outputs — never commit customer/corporate decks
 spike/*.pptx
 templates-local/
+
+# Local secrets (never commit)
+.env

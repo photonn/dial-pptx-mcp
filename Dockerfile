@@ -4,6 +4,12 @@ FROM python:3.12-slim
 RUN useradd --create-home --uid 1000 appuser
 WORKDIR /app
 
+# LibreOffice renders slides to PDF for the visual-inspection tool.
+# Common free fonts reduce font-substitution drift in renders.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-impress fonts-liberation fonts-dejavu \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

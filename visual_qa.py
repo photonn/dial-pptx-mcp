@@ -1,0 +1,187 @@
+"""
+Visual inspection of generated presentations (render + vision-LLM review).
+
+Pipeline (inspired by the render/inspect loop of document-generation agents,
+implemented independently):
+1. Render the .pptx to one PNG per slide: LibreOffice headless converts the
+   deck to PDF, PyMuPDF rasterizes the pages. LibreOffice must be installed
+   (`soffice` on PATH, or SOFFICE_PATH env var); the Dockerfile includes it.
+2. Send the slide images to a configurable external vision LLM with a
+   fidelity/error checklist, and parse a structured verdict.
+
+The LLM endpoint speaks the OpenAI Responses API with image input
+(Azure OpenAI included). Configuration via environment (see .env.example):
+- VISION_LLM_ENDPOINT   full URL, e.g.
+  https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview
+- VISION_LLM_API_KEY    sent as both api-key (Azure) and Authorization: Bearer
+- VISION_LLM_MODEL      model / Azure deployment name (must accept images)
+- VISION_LLM_MAX_SLIDES cap on slides sent per inspection (default 15)
+- SOFFICE_PATH          LibreOffice binary if not "soffice" on PATH
+"""
+import base64
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import httpx
+
+
+class VisualQAError(RuntimeError):
+    pass
+
+
+# ---- Rendering ----
+
+def _soffice_binary():
+    path = os.environ.get("SOFFICE_PATH") or shutil.which("soffice")
+    if not path or not os.path.exists(path):
+        raise VisualQAError(
+            "LibreOffice is required for slide rendering but was not found. "
+            "Install it (the server Docker image includes it) or set "
+            "SOFFICE_PATH to the soffice binary."
+        )
+    return path
+
+
+def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
+                              max_slides: int = None) -> list:
+    """Render presentation bytes to a list of PNG bytes, one per slide."""
+    import pymupdf
+
+    with tempfile.TemporaryDirectory(prefix="pptx-visual-qa-") as tmp:
+        tmp = Path(tmp)
+        src = tmp / "deck.pptx"
+        src.write_bytes(pptx_data)
+        # Isolated LibreOffice profile so concurrent renders don't fight
+        # over the shared user profile lock.
+        profile = tmp / "lo-profile"
+        cmd = [
+            _soffice_binary(), "--headless", "--norestore",
+            f"-env:UserInstallation=file://{profile}",
+            "--convert-to", "pdf", "--outdir", str(tmp), str(src),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        pdf = tmp / "deck.pdf"
+        if proc.returncode != 0 or not pdf.exists():
+            raise VisualQAError(
+                "LibreOffice failed to render the presentation: "
+                + proc.stderr.decode(errors="replace")[-500:]
+            )
+        images = []
+        with pymupdf.open(pdf) as doc:
+            pages = doc.page_count if max_slides is None else min(doc.page_count, max_slides)
+            for i in range(pages):
+                pix = doc[i].get_pixmap(dpi=dpi)
+                images.append(pix.tobytes("png"))
+        return images
+
+
+# ---- Vision LLM client (OpenAI Responses API shape, Azure-compatible) ----
+
+REVIEW_PROMPT = """You are a meticulous presentation QA reviewer. You are shown \
+rendered slide images of a PowerPoint deck generated from a corporate template{ref_note}.
+
+Check every slide for:
+1. Template/brand fidelity: consistent colors, fonts, logo placement, and layout \
+usage matching the deck's own master style{ref_clause}.
+2. Visible errors: text overflowing or clipped by its container, overlapping \
+elements, elements off the slide edge, placeholder text left unfilled (e.g. \
+"Click to add title"), broken or empty charts/tables/images, illegible text \
+(too small or poor contrast), inconsistent alignment or spacing.
+
+Respond with ONLY a JSON object, no markdown fence:
+{{"passed": true|false, "issues": [{{"slide": <1-based number>, "severity": \
+"critical"|"major"|"minor", "description": "...", "suggested_fix": "..."}}]}}
+"passed" is true only when there are no critical or major issues."""
+
+
+class VisionLLMConfigError(VisualQAError):
+    pass
+
+
+class VisionLLM:
+    def __init__(self):
+        self.endpoint = os.environ.get("VISION_LLM_ENDPOINT")
+        self.api_key = os.environ.get("VISION_LLM_API_KEY")
+        self.model = os.environ.get("VISION_LLM_MODEL")
+        if not (self.endpoint and self.api_key and self.model):
+            raise VisionLLMConfigError(
+                "Visual inspection is not configured on this server: set "
+                "VISION_LLM_ENDPOINT, VISION_LLM_API_KEY and VISION_LLM_MODEL "
+                "(see .env.example)."
+            )
+
+    def build_payload(self, images: list, prompt: str) -> dict:
+        content = [{"type": "input_text", "text": prompt}]
+        for png in images:
+            b64 = base64.b64encode(png).decode()
+            content.append({
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{b64}",
+            })
+        return {"model": self.model,
+                "input": [{"role": "user", "content": content}]}
+
+    @staticmethod
+    def extract_text(response_json: dict) -> str:
+        """Pull the assistant text out of a Responses API result."""
+        if isinstance(response_json.get("output_text"), str):
+            return response_json["output_text"]
+        parts = []
+        for item in response_json.get("output", []):
+            if item.get("type") == "message":
+                for c in item.get("content", []):
+                    if c.get("type") == "output_text":
+                        parts.append(c.get("text", ""))
+        if not parts:
+            raise VisualQAError("Vision LLM returned no text output.")
+        return "\n".join(parts)
+
+    @staticmethod
+    def parse_verdict(text: str) -> dict:
+        """Parse the reviewer's JSON verdict, tolerating a stray code fence."""
+        candidate = text.strip()
+        m = re.search(r"\{.*\}", candidate, re.S)
+        if m:
+            candidate = m.group(0)
+        try:
+            verdict = json.loads(candidate)
+            if isinstance(verdict, dict) and "passed" in verdict:
+                verdict.setdefault("issues", [])
+                return verdict
+        except json.JSONDecodeError:
+            pass
+        return {"passed": None, "issues": [],
+                "raw_review": text,
+                "note": "Reviewer response was not valid JSON; see raw_review."}
+
+    def review(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+        headers = {
+            "api-key": self.api_key,                       # Azure OpenAI
+            "Authorization": f"Bearer {self.api_key}",     # OpenAI-compatible
+            "Content-Type": "application/json",
+        }
+        r = httpx.post(self.endpoint, headers=headers,
+                       json=self.build_payload(images, prompt), timeout=timeout)
+        if r.status_code != 200:
+            raise VisualQAError(
+                f"Vision LLM request failed with HTTP {r.status_code}: "
+                + r.text[:300]
+            )
+        return self.parse_verdict(self.extract_text(r.json()))
+
+
+def review_prompt(has_reference: bool, focus: str = None) -> str:
+    prompt = REVIEW_PROMPT.format(
+        ref_note=(". The FIRST images are the reference template's slides; "
+                  "the deck under review follows" if has_reference else ""),
+        ref_clause=(" and matching the reference template images"
+                    if has_reference else ""),
+    )
+    if focus:
+        prompt += f"\nAdditional focus requested by the caller: {focus}"
+    return prompt

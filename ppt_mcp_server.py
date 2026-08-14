@@ -6,6 +6,11 @@ Consolidated version with 20 tools organized into multiple modules.
 import os
 import argparse
 from typing import Dict, Any
+
+from dotenv import load_dotenv
+# .env next to this file, if present; real env vars take precedence
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 from mcp.server.fastmcp import FastMCP
 
 # import utils  # Currently unused
@@ -19,7 +24,8 @@ from tools import (
     register_chart_tools,
     register_connector_tools,
     register_master_tools,
-    register_transition_tools
+    register_transition_tools,
+    register_visual_tools
 )
 
 # Initialize the FastMCP server
@@ -278,6 +284,11 @@ register_transition_tools(
     is_non_negative,
     is_in_range,
     is_valid_rgb
+)
+
+register_visual_tools(
+    app,
+    presentations
 )
 
 
