@@ -17,19 +17,17 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation",
         ),
     )
-    def create_presentation(id: Optional[str] = None) -> Dict:
-        """Create a new PowerPoint presentation."""
+    def create_presentation() -> Dict:
+        """Create a new PowerPoint presentation. Returns a presentation_id
+        that must be passed to all subsequent tool calls for this deck."""
         # Create a new presentation
         pres = ppt_utils.create_presentation()
-        
-        # Generate an ID if not provided
-        if id is None:
-            id = f"presentation_{len(presentations) + 1}"
-        
-        # Store the presentation
+
+        # Server-generated unguessable handle (multi-tenant safety):
+        # client-chosen IDs are not accepted.
+        id = presentations.new_id()
         presentations[id] = pres
-        # Set as current presentation (this would need to be handled by caller)
-        
+
         return {
             "presentation_id": id,
             "message": f"Created new presentation with ID: {id}",
@@ -41,8 +39,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation from Template",
         ),
     )
-    def create_presentation_from_template(template_path: str, id: Optional[str] = None) -> Dict:
-        """Create a new PowerPoint presentation from a template file."""
+    def create_presentation_from_template(template_path: str) -> Dict:
+        """Create a new PowerPoint presentation from a template file. Returns
+        a presentation_id that must be passed to all subsequent tool calls."""
         # Check if template file exists
         if not os.path.exists(template_path):
             # Try to find the template by searching in configured directories
@@ -68,13 +67,10 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 "error": f"Failed to create presentation from template: {str(e)}"
             }
         
-        # Generate an ID if not provided
-        if id is None:
-            id = f"presentation_{len(presentations) + 1}"
-        
-        # Store the presentation
+        # Server-generated unguessable handle (multi-tenant safety)
+        id = presentations.new_id()
         presentations[id] = pres
-        
+
         return {
             "presentation_id": id,
             "message": f"Created new presentation from template '{template_path}' with ID: {id}",
@@ -89,8 +85,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             readOnlyHint=True,
         ),
     )
-    def open_presentation(file_path: str, id: Optional[str] = None) -> Dict:
-        """Open an existing PowerPoint presentation from a file."""
+    def open_presentation(file_path: str) -> Dict:
+        """Open an existing PowerPoint presentation from a file. Returns a
+        presentation_id that must be passed to all subsequent tool calls."""
         # Check if file exists
         if not os.path.exists(file_path):
             return {
@@ -105,13 +102,10 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 "error": f"Failed to open presentation: {str(e)}"
             }
         
-        # Generate an ID if not provided
-        if id is None:
-            id = f"presentation_{len(presentations) + 1}"
-        
-        # Store the presentation
+        # Server-generated unguessable handle (multi-tenant safety)
+        id = presentations.new_id()
         presentations[id] = pres
-        
+
         return {
             "presentation_id": id,
             "message": f"Opened presentation from {file_path} with ID: {id}",
@@ -131,7 +125,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         
         if pres_id is None or pres_id not in presentations:
             return {
-                "error": "No presentation is currently loaded or the specified ID is invalid"
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
         
         # Save the presentation
@@ -158,7 +152,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         
         if pres_id is None or pres_id not in presentations:
             return {
-                "error": "No presentation is currently loaded or the specified ID is invalid"
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
         
         pres = presentations[pres_id]
@@ -221,7 +215,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         
         if pres_id is None or pres_id not in presentations:
             return {
-                "error": "No presentation is currently loaded or the specified ID is invalid"
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
         
         pres = presentations[pres_id]

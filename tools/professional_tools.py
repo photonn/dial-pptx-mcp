@@ -40,7 +40,7 @@ def register_professional_tools(app: FastMCP, presentations: Dict, get_current_p
         
         if pres_id is None or pres_id not in presentations:
             return {
-                "error": "No presentation is currently loaded or the specified ID is invalid"
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
         
         pres = presentations[pres_id]
@@ -137,7 +137,7 @@ def register_professional_tools(app: FastMCP, presentations: Dict, get_current_p
         
         if pres_id is None or pres_id not in presentations:
             return {
-                "error": "No presentation is currently loaded or the specified ID is invalid"
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
         
         pres = presentations[pres_id]

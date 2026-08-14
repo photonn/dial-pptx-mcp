@@ -27,9 +27,11 @@ app = FastMCP(
     name="ppt-mcp-server"
 )
 
-# Global state to store presentations in memory
-presentations = {}
-current_presentation_id = None
+# Presentation state: concurrency-safe, UUID-handle store (see state.py).
+# Dict-like, so existing tool call sites work unchanged.
+from state import PresentationStore, serialize_per_presentation
+
+presentations = PresentationStore()
 
 # Template configuration
 def get_template_search_directories():
@@ -67,20 +69,12 @@ def get_template_search_directories():
 
 # ---- Helper Functions ----
 
-def get_current_presentation():
-    """Get the current presentation object or raise an error if none is loaded."""
-    if current_presentation_id is None or current_presentation_id not in presentations:
-        raise ValueError("No presentation is currently loaded. Please create or open a presentation first.")
-    return presentations[current_presentation_id]
-
 def get_current_presentation_id():
-    """Get the current presentation ID."""
-    return current_presentation_id
-
-def set_current_presentation_id(pres_id):
-    """Set the current presentation ID."""
-    global current_presentation_id
-    current_presentation_id = pres_id
+    """There is no 'current presentation' on a shared multi-tenant server:
+    every tool call must pass the presentation_id handle explicitly.
+    (Upstream's implicit-current mechanism was already non-functional —
+    nothing ever set the global.)"""
+    return None
 
 def validate_parameters(params):
     """
@@ -187,45 +181,7 @@ def add_shape_direct(slide, shape_type: str, left: float, top: float, width: flo
     except Exception as e:
         raise ValueError(f"Failed to create '{shape_type}' shape using direct value {shape_value}: {str(e)}")
 
-# ---- Custom presentation management wrapper ----
-
-class PresentationManager:
-    """Wrapper to handle presentation state updates."""
-    
-    def __init__(self, presentations_dict):
-        self.presentations = presentations_dict
-    
-    def store_presentation(self, pres, pres_id):
-        """Store a presentation and set it as current."""
-        self.presentations[pres_id] = pres
-        set_current_presentation_id(pres_id)
-        return pres_id
-
 # ---- Register Tools ----
-
-# Create presentation manager wrapper
-presentation_manager = PresentationManager(presentations)
-
-# Wrapper functions to handle state management
-def create_presentation_wrapper(original_func):
-    """Wrapper to handle presentation creation with state management."""
-    def wrapper(*args, **kwargs):
-        result = original_func(*args, **kwargs)
-        if "presentation_id" in result and result["presentation_id"] in presentations:
-            set_current_presentation_id(result["presentation_id"])
-        return result
-    return wrapper
-
-def open_presentation_wrapper(original_func):
-    """Wrapper to handle presentation opening with state management."""
-    def wrapper(*args, **kwargs):
-        result = original_func(*args, **kwargs)
-        if "presentation_id" in result and result["presentation_id"] in presentations:
-            set_current_presentation_id(result["presentation_id"])
-        return result
-    return wrapper
-
-# Register all tool modules
 register_presentation_tools(
     app, 
     presentations, 
@@ -326,40 +282,10 @@ register_transition_tools(
 
 
 # ---- Additional Utility Tools ----
-
-@app.tool()
-def list_presentations() -> Dict:
-    """List all loaded presentations."""
-    return {
-        "presentations": [
-            {
-                "id": pres_id,
-                "slide_count": len(pres.slides),
-                "is_current": pres_id == current_presentation_id
-            }
-            for pres_id, pres in presentations.items()
-        ],
-        "current_presentation_id": current_presentation_id,
-        "total_presentations": len(presentations)
-    }
-
-@app.tool()
-def switch_presentation(presentation_id: str) -> Dict:
-    """Switch to a different loaded presentation."""
-    if presentation_id not in presentations:
-        return {
-            "error": f"Presentation '{presentation_id}' not found. Available presentations: {list(presentations.keys())}"
-        }
-    
-    global current_presentation_id
-    old_id = current_presentation_id
-    current_presentation_id = presentation_id
-    
-    return {
-        "message": f"Switched from presentation '{old_id}' to '{presentation_id}'",
-        "previous_presentation_id": old_id,
-        "current_presentation_id": current_presentation_id
-    }
+# Note: upstream's list_presentations and switch_presentation tools are
+# removed on purpose: on a shared multi-tenant server the former leaked every
+# tenant's presentation handles and the latter only mutated the (removed)
+# global "current presentation" pointer.
 
 @app.tool()
 def get_server_info() -> Dict:
@@ -369,7 +295,6 @@ def get_server_info() -> Dict:
         "version": "2.1.0",
         "total_tools": 32,  # Organized into 11 specialized modules
         "loaded_presentations": len(presentations),
-        "current_presentation": current_presentation_id,
         "features": [
             "Presentation Management (7 tools)",
             "Content Management (6 tools)", 
@@ -404,6 +329,9 @@ def get_server_info() -> Dict:
 
 # ---- Main Function ----
 def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
+    # Serialize tool calls that target the same presentation (python-pptx is
+    # not thread-safe); calls on different presentations run concurrently.
+    serialize_per_presentation(app, presentations)
     if transport == "http":
         import asyncio
         # Set the host/port for HTTP transport (host must be 0.0.0.0 in containers)
