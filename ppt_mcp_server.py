@@ -338,6 +338,36 @@ def get_server_info() -> Dict:
         ]
     }
 
+def _transport_security_for(host: str):
+    """Host-header (DNS-rebinding) protection for the HTTP transports.
+
+    FastMCP auto-enables a localhost-only allowlist when constructed, which
+    421-rejects any remote Host header (e.g. Kubernetes service DNS names)
+    once the server binds a non-loopback address.
+
+    - PPT_MCP_ALLOWED_HOSTS set (comma-separated hostnames): protection is ON
+      and exactly those hosts (any port) plus localhost are accepted.
+    - Unset + non-loopback bind: protection is DISABLED — the standard posture
+      for a network service that is fronted by ingress/service routing.
+    - Unset + loopback bind: keep FastMCP's localhost-only default (None).
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    allowed = os.environ.get("PPT_MCP_ALLOWED_HOSTS", "").strip()
+    if allowed:
+        hosts = []
+        for h in allowed.split(","):
+            h = h.strip()
+            if h:
+                hosts += [h, f"{h}:*"]
+        hosts += ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        return TransportSecuritySettings(
+            enable_dns_rebinding_protection=True, allowed_hosts=hosts)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return None
+
+
 # ---- Main Function ----
 def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
     # Serialize tool calls that target the same presentation (python-pptx is
@@ -348,6 +378,9 @@ def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
         # Set the host/port for HTTP transport (host must be 0.0.0.0 in containers)
         app.settings.host = host
         app.settings.port = port
+        security = _transport_security_for(host)
+        if security is not None:
+            app.settings.transport_security = security
         # Start the FastMCP server with HTTP transport
         try:
             app.run(transport='streamable-http')
@@ -362,6 +395,9 @@ def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
         # Run the FastMCP server in SSE (Server Side Events) mode
         app.settings.host = host
         app.settings.port = port
+        security = _transport_security_for(host)
+        if security is not None:
+            app.settings.transport_security = security
         app.run(transport='sse')
         
     else:

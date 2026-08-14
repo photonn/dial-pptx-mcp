@@ -26,6 +26,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_TRANSPORT` | no | `stdio` | `http` (streamable-http, recommended for DIAL), `sse`, or `stdio` |
 | `PPT_MCP_HOST` | no | `127.0.0.1` | Bind address; set `0.0.0.0` in containers (the Dockerfile does) |
 | `PPT_MCP_PORT` | no | `8000` | Listen port for http/sse |
+| `PPT_MCP_ALLOWED_HOSTS` | no | — | Comma-separated Host-header allowlist for http/sse (e.g. `dial-pptx-mcp.dial.svc.cluster.local`). Set → only those hosts (plus localhost) are accepted, others get `421`. Unset → Host checking is disabled for non-loopback binds; loopback binds keep the SDK's localhost-only protection |
 | `DIAL_CORE_URL` | for DIAL export | — | Base URL of DIAL Core, e.g. `https://dial.example.com`. Unset → DIAL upload/download tools return a clear error; local-path tools still work |
 | `DIAL_AUTH_MODE` | no | `auto` | `auto`: credentials from the incoming MCP request first (the end user's bearer, attached by Quick Apps for servers deployed under the DIAL host — exports land in that user's own bucket), falling back to `DIAL_API_KEY`. `caller`: incoming credentials only — fail loudly instead of falling back. `server`: always `DIAL_API_KEY` (single shared bucket) |
 | `DIAL_API_KEY` | no | — | Server's own DIAL API key — the fallback identity in `auto` mode, the only identity in `server` mode |
