@@ -1,4 +1,4 @@
-mcp[cli]
+mcp[cli]>=1.8.0,<2.0.0
 python-pptx
 Pillow
 fonttools

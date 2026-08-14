@@ -403,10 +403,11 @@ def get_server_info() -> Dict:
     }
 
 # ---- Main Function ----
-def main(transport: str = "stdio", port: int = 8000):
+def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
     if transport == "http":
         import asyncio
-        # Set the port for HTTP transport
+        # Set the host/port for HTTP transport (host must be 0.0.0.0 in containers)
+        app.settings.host = host
         app.settings.port = port
         # Start the FastMCP server with HTTP transport
         try:
@@ -420,6 +421,8 @@ def main(transport: str = "stdio", port: int = 8000):
             
     elif transport == "sse":
         # Run the FastMCP server in SSE (Server Side Events) mode
+        app.settings.host = host
+        app.settings.port = port
         app.run(transport='sse')
         
     else:
@@ -434,17 +437,25 @@ if __name__ == "__main__":
         "-t",
         "--transport",
         type=str,
-        default="stdio",
+        default=os.environ.get("PPT_MCP_TRANSPORT", "stdio"),
         choices=["stdio", "http", "sse"],
-        help="Transport method for the MCP server (default: stdio)"
+        help="Transport method for the MCP server (default: stdio; env: PPT_MCP_TRANSPORT)"
     )
 
     parser.add_argument(
         "-p",
         "--port",
         type=int,
-        default=8000,
-        help="Port to run the MCP server on (default: 8000)"
+        default=int(os.environ.get("PPT_MCP_PORT", "8000")),
+        help="Port to run the MCP server on (default: 8000; env: PPT_MCP_PORT)"
+    )
+
+    parser.add_argument(
+        "--host",
+        type=str,
+        default=os.environ.get("PPT_MCP_HOST", "127.0.0.1"),
+        help="Host to bind for http/sse transports (default: 127.0.0.1; "
+             "set to 0.0.0.0 in containers; env: PPT_MCP_HOST)"
     )
     args = parser.parse_args()
-    main(args.transport, args.port)
+    main(args.transport, args.port, args.host)
