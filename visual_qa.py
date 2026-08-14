@@ -159,7 +159,8 @@ class VisionLLM:
                 "raw_review": text,
                 "note": "Reviewer response was not valid JSON; see raw_review."}
 
-    def review(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+    def ask(self, images: list, prompt: str, timeout: float = 300.0) -> str:
+        """Send prompt + images, return the model's raw text answer."""
         headers = {
             "api-key": self.api_key,                       # Azure OpenAI
             "Authorization": f"Bearer {self.api_key}",     # OpenAI-compatible
@@ -172,7 +173,23 @@ class VisionLLM:
                 f"Vision LLM request failed with HTTP {r.status_code}: "
                 + r.text[:300]
             )
-        return self.parse_verdict(self.extract_text(r.json()))
+        return self.extract_text(r.json())
+
+    def review(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+        return self.parse_verdict(self.ask(images, prompt, timeout))
+
+    def ask_json(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+        """Like ask(), parsed as a JSON object ({} when unparseable)."""
+        text = self.ask(images, prompt, timeout)
+        candidate = text.strip()
+        m = re.search(r"\{.*\}", candidate, re.S)
+        if m:
+            candidate = m.group(0)
+        try:
+            data = json.loads(candidate)
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
 
 def enforcement_enabled() -> bool:
@@ -219,6 +236,62 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None) -> dict:
     verdict = llm.review(ref_images + deck_images, prompt)
     verdict["slides_reviewed"] = len(deck_images)
     return verdict
+
+
+def _render_deck(pres, max_slides):
+    import io
+    buf = io.BytesIO()
+    pres.save(buf)
+    return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides)
+
+
+def inspect_and_repair(pres) -> dict:
+    """Internal QA loop: inspect the deck; on failure, repair it in place via
+    the LLM-planned whitelisted operations (visual_fix.py) and inspect again,
+    up to VISUAL_QA_MAX_ITERATIONS (default 3) inspections.
+
+    Returns {"passed": bool, "iterations": n, "repair_rounds": [...],
+    "issues": [...]} — "issues" holds what remains when passed is False.
+    Raises VisualQAError on infrastructure failure (renderer/LLM).
+    """
+    import visual_fix
+
+    llm = VisionLLM()
+    max_slides = int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+    max_iterations = max(1, int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "3")))
+
+    repair_rounds = []
+    verdict = {}
+    for iteration in range(1, max_iterations + 1):
+        deck_images = _render_deck(pres, max_slides)
+        verdict = llm.review(deck_images, review_prompt(False))
+        verdict["slides_reviewed"] = len(deck_images)
+        if verdict.get("passed") is True:
+            return {"passed": True, "iterations": iteration,
+                    "repair_rounds": repair_rounds}
+        issues = verdict.get("issues", [])
+        if iteration == max_iterations or not issues:
+            # Out of budget, or nothing actionable (e.g. unparseable review)
+            break
+        plan = visual_fix.plan_repairs(llm, issues, pres, deck_images)
+        result = visual_fix.apply_repairs(pres, plan)
+        repair_rounds.append({
+            "iteration": iteration,
+            "issues_found": len(issues),
+            "operations_applied": len(result["applied"]),
+            "operations_skipped": len(result["skipped"]),
+        })
+        if not result["applied"]:
+            break  # no progress is possible; stop burning inspections
+
+    out = {"passed": False,
+           "iterations": len(repair_rounds) + 1,
+           "repair_rounds": repair_rounds,
+           "issues": verdict.get("issues", [])}
+    for key in ("raw_review", "note"):
+        if key in verdict:
+            out[key] = verdict[key]
+    return out
 
 
 def review_prompt(has_reference: bool, focus: str = None) -> str:

@@ -12,10 +12,15 @@ import utils as ppt_utils
 def _visual_qa_gate(presentations, pres_id):
     """Automatic visual QA before a deck leaves the server (export or save).
 
-    Runs only when the vision LLM is configured (see visual_qa.py) and the
-    deck was edited since its last passed inspection. Returns None to let the
-    export proceed, or the refusal dict to return to the caller.
+    Fully internal: inspects the deck and, when issues are found, repairs it
+    in place and re-inspects (visual_qa.inspect_and_repair), so callers
+    receive a finished, verified presentation — never a fix-and-retry
+    request. Runs only when the vision LLM is configured and the deck was
+    edited since it last passed. Returns None to let the export proceed, or
+    an error dict when QA could not verify the deck.
     """
+    import os
+
     import visual_qa
 
     if not visual_qa.enforcement_enabled():
@@ -23,30 +28,34 @@ def _visual_qa_gate(presentations, pres_id):
     if not presentations.is_dirty(pres_id):
         return None
     try:
-        verdict = visual_qa.inspect_presentation(presentations[pres_id])
+        outcome = visual_qa.inspect_and_repair(presentations[pres_id])
     except visual_qa.VisualQAError as e:
         if visual_qa.fail_open_on_error():
             return None
         return {
-            "error": f"Automatic visual inspection could not run ({e}). "
+            "error": f"Automatic visual QA could not run ({e}). "
                      "The export was blocked; fix the inspection setup, or "
                      "set VISUAL_QA_ON_ERROR=allow to export uninspected."
         }
-    if verdict.get("passed") is True:
+    if outcome["passed"]:
         presentations.clear_dirty(pres_id)
         return None
+    if os.environ.get("VISUAL_QA_ON_UNRESOLVED", "block").lower() == "export":
+        return None  # operator chose to ship best-effort decks
     refusal = {
-        "error": "Automatic visual inspection FAILED — the presentation was "
-                 "not exported.",
-        "issues": verdict.get("issues", []),
-        "slides_reviewed": verdict.get("slides_reviewed"),
-        "message": "Fix the reported issues with the editing tools, then "
-                   "retry the export; it is re-inspected automatically and "
-                   "will succeed once the deck passes.",
+        "error": "Automatic visual QA could not bring the presentation to a "
+                 f"passing state after {outcome['iterations']} internal "
+                 "inspection/repair round(s). The presentation was not "
+                 "exported.",
+        "unresolved_issues": outcome.get("issues", []),
+        "repair_rounds": outcome.get("repair_rounds", []),
+        "message": "This is a server-side quality failure, not a request to "
+                   "retry. Report the unresolved issues to the user, or "
+                   "adjust the deck content and export again.",
     }
     for key in ("raw_review", "note"):
-        if key in verdict:
-            refusal[key] = verdict[key]
+        if key in outcome:
+            refusal[key] = outcome[key]
     return refusal
 
 

@@ -52,50 +52,57 @@ class TestEnforcementSwitch(GateTestCase):
 
 
 class TestGateVerdicts(GateTestCase):
-    def test_failing_deck_is_refused_and_stays_dirty(self):
-        verdict = {"passed": False, "issues": [
-            {"slide": 1, "severity": "major", "description": "overflow"}]}
-        with patch.object(visual_qa, "inspect_presentation", return_value=verdict):
+    def test_unresolved_deck_is_refused_and_stays_dirty(self):
+        outcome = {"passed": False, "iterations": 3, "repair_rounds": [],
+                   "issues": [{"slide": 1, "severity": "major",
+                               "description": "overflow"}]}
+        with patch.object(visual_qa, "inspect_and_repair", return_value=outcome):
             refusal = _visual_qa_gate(self.store, self.pid)
         self.assertIn("error", refusal)
-        self.assertEqual(refusal["issues"][0]["slide"], 1)
+        self.assertIn("not a request to retry", refusal["message"])
+        self.assertEqual(refusal["unresolved_issues"][0]["slide"], 1)
         self.assertTrue(self.store.is_dirty(self.pid))
 
+    def test_unresolved_can_export_when_configured(self):
+        os.environ["VISUAL_QA_ON_UNRESOLVED"] = "export"
+        try:
+            outcome = {"passed": False, "iterations": 3, "repair_rounds": [],
+                       "issues": [{"slide": 1}]}
+            with patch.object(visual_qa, "inspect_and_repair",
+                              return_value=outcome):
+                self.assertIsNone(_visual_qa_gate(self.store, self.pid))
+        finally:
+            os.environ.pop("VISUAL_QA_ON_UNRESOLVED")
+
     def test_passing_deck_clears_dirty_and_skips_reinspection(self):
-        verdict = {"passed": True, "issues": []}
-        with patch.object(visual_qa, "inspect_presentation",
-                          return_value=verdict) as mock:
+        outcome = {"passed": True, "iterations": 1, "repair_rounds": []}
+        with patch.object(visual_qa, "inspect_and_repair",
+                          return_value=outcome) as mock:
             self.assertIsNone(_visual_qa_gate(self.store, self.pid))
             self.assertIsNone(_visual_qa_gate(self.store, self.pid))
         self.assertEqual(mock.call_count, 1)  # clean deck not re-inspected
         self.assertFalse(self.store.is_dirty(self.pid))
 
     def test_edit_after_pass_requires_reinspection(self):
-        with patch.object(visual_qa, "inspect_presentation",
-                          return_value={"passed": True, "issues": []}) as mock:
+        outcome = {"passed": True, "iterations": 1, "repair_rounds": []}
+        with patch.object(visual_qa, "inspect_and_repair",
+                          return_value=outcome) as mock:
             _visual_qa_gate(self.store, self.pid)
             self.store.mark_dirty(self.pid)  # what the tool wrapper does
             _visual_qa_gate(self.store, self.pid)
         self.assertEqual(mock.call_count, 2)
 
-    def test_unparseable_verdict_blocks(self):
-        verdict = {"passed": None, "issues": [], "raw_review": "looks ok?"}
-        with patch.object(visual_qa, "inspect_presentation", return_value=verdict):
-            refusal = _visual_qa_gate(self.store, self.pid)
-        self.assertIn("error", refusal)
-        self.assertEqual(refusal["raw_review"], "looks ok?")
-
 
 class TestGateInfraErrors(GateTestCase):
     def test_infra_error_blocks_by_default(self):
-        with patch.object(visual_qa, "inspect_presentation",
+        with patch.object(visual_qa, "inspect_and_repair",
                           side_effect=visual_qa.VisualQAError("no soffice")):
             refusal = _visual_qa_gate(self.store, self.pid)
         self.assertIn("no soffice", refusal["error"])
 
     def test_infra_error_allows_when_configured(self):
         os.environ["VISUAL_QA_ON_ERROR"] = "allow"
-        with patch.object(visual_qa, "inspect_presentation",
+        with patch.object(visual_qa, "inspect_and_repair",
                           side_effect=visual_qa.VisualQAError("down")):
             self.assertIsNone(_visual_qa_gate(self.store, self.pid))
 
