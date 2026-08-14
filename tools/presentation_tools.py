@@ -199,6 +199,102 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
     @app.tool(
         annotations=ToolAnnotations(
+            title="Create Presentation from Template Content",
+        ),
+    )
+    def create_presentation_from_template_content(template_content: str) -> Dict:
+        """Create a new presentation from an uploaded .pptx template file.
+
+        template_content: the .pptx template file content, as a data: URI or a
+        base64-encoded string (in DIAL Quick Apps, pass the template file as
+        file:data::files/{bucket}/{path} and it is resolved automatically).
+
+        The template's theme, layouts, masters and branding are preserved.
+        Returns a presentation_id that must be passed to all subsequent tool
+        calls for this deck.
+        """
+        import base64
+        import binascii
+        import io
+
+        payload = template_content.strip()
+        if payload.startswith("data:"):
+            # RFC 2397: data:<mime>;base64,<payload>
+            _, _, payload = payload.partition(",")
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            return {
+                "error": "template_content is not valid base64. Pass the "
+                         "template as a data: URI or base64 string (in DIAL "
+                         "Quick Apps: file:data::<dial file path>)."
+            }
+        if not raw.startswith(b"PK"):
+            return {
+                "error": "Decoded template_content is not a .pptx file "
+                         "(expected a ZIP/OOXML container)."
+            }
+
+        try:
+            from pptx import Presentation
+            pres = Presentation(io.BytesIO(raw))
+        except Exception as e:
+            return {"error": f"Failed to open template: {str(e)}"}
+
+        # Server-generated unguessable handle (multi-tenant safety)
+        id = presentations.new_id()
+        presentations[id] = pres
+
+        return {
+            "presentation_id": id,
+            "message": f"Created new presentation from uploaded template with ID: {id}",
+            "slide_count": len(pres.slides),
+            "layout_count": len(pres.slide_layouts)
+        }
+
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="Export Presentation to DIAL Files",
+        ),
+    )
+    def export_presentation(presentation_id: str, filename: str = "presentation.pptx") -> Dict:
+        """Export the presentation to DIAL file storage and return its file URL.
+
+        Use this (not save_presentation) to deliver the finished deck to the
+        user. ALWAYS include the returned file_url in your final answer as an
+        attachment so the user can download the presentation.
+        """
+        from dial_client import DialFileClient, DialConfigError, PPTX_MIME
+
+        if presentation_id not in presentations:
+            return {
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
+            }
+        pres = presentations[presentation_id]
+
+        if not filename.lower().endswith(".pptx"):
+            filename += ".pptx"
+
+        try:
+            import io
+            buf = io.BytesIO()
+            pres.save(buf)
+            client = DialFileClient()
+            file_url = client.upload(buf.getvalue(), filename)
+            return {
+                "message": f"Presentation exported to DIAL file storage: {file_url}. "
+                           "Include this file URL in your final answer.",
+                "file_url": file_url,
+                "mime_type": PPTX_MIME,
+                "size_bytes": buf.getbuffer().nbytes
+            }
+        except DialConfigError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"Failed to export presentation to DIAL: {str(e)}"}
+
+    @app.tool(
+        annotations=ToolAnnotations(
             title="Set Core Properties",
         ),
     )
