@@ -175,6 +175,52 @@ class VisionLLM:
         return self.parse_verdict(self.extract_text(r.json()))
 
 
+def enforcement_enabled() -> bool:
+    """Automatic visual QA is on when the vision LLM is configured, unless
+    explicitly disabled with VISUAL_QA_ENFORCE=false."""
+    configured = all(os.environ.get(k) for k in
+                     ("VISION_LLM_ENDPOINT", "VISION_LLM_API_KEY",
+                      "VISION_LLM_MODEL"))
+    return configured and os.environ.get(
+        "VISUAL_QA_ENFORCE", "true").lower() != "false"
+
+
+def fail_open_on_error() -> bool:
+    """VISUAL_QA_ON_ERROR=allow lets exports through when inspection itself
+    fails (renderer missing, endpoint down). Default is to block."""
+    return os.environ.get("VISUAL_QA_ON_ERROR", "block").lower() == "allow"
+
+
+def inspect_presentation(pres, reference_pres=None, focus: str = None) -> dict:
+    """Render a python-pptx Presentation (and optional reference) and return
+    the vision reviewer's verdict. Raises VisualQAError on infrastructure
+    failure (renderer/LLM)."""
+    import io
+
+    llm = VisionLLM()
+    max_slides = int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+
+    def render(p):
+        buf = io.BytesIO()
+        p.save(buf)
+        return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides)
+
+    deck_images = render(pres)
+    ref_images = render(reference_pres) if reference_pres is not None else []
+
+    prompt = review_prompt(bool(ref_images), focus)
+    if ref_images:
+        prompt += (
+            f"\nImage order: images 1-{len(ref_images)} are the reference "
+            f"template; images {len(ref_images) + 1}-"
+            f"{len(ref_images) + len(deck_images)} are the deck under review. "
+            "Report issue slide numbers relative to the deck under review."
+        )
+    verdict = llm.review(ref_images + deck_images, prompt)
+    verdict["slides_reviewed"] = len(deck_images)
+    return verdict
+
+
 def review_prompt(has_reference: bool, focus: str = None) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "

@@ -57,6 +57,9 @@ class PresentationStore(MutableMapping):
                 "pres": pres,
                 "lock": threading.RLock(),
                 "last_used": time.monotonic(),
+                # A deck that was never inspected (or edited since its last
+                # passed inspection) needs visual QA before export.
+                "needs_inspection": True,
             }
             self._purge()
 
@@ -84,6 +87,23 @@ class PresentationStore(MutableMapping):
         with self._lock:
             return len(self._items)
 
+    def mark_dirty(self, pres_id):
+        with self._lock:
+            entry = self._items.get(pres_id)
+            if entry:
+                entry["needs_inspection"] = True
+
+    def clear_dirty(self, pres_id):
+        with self._lock:
+            entry = self._items.get(pres_id)
+            if entry:
+                entry["needs_inspection"] = False
+
+    def is_dirty(self, pres_id):
+        with self._lock:
+            entry = self._items.get(pres_id)
+            return bool(entry and entry["needs_inspection"])
+
     def lock_for(self, pres_id):
         """Per-presentation lock, or a throwaway lock for unknown/missing IDs
         (the tool will then return its normal not-found error)."""
@@ -92,9 +112,17 @@ class PresentationStore(MutableMapping):
             return entry["lock"] if entry else threading.RLock()
 
 
+# Tools that touch a presentation without editing its content: they must not
+# re-flag a passed deck as needing inspection.
+_NON_EDITING_TOOLS = {"export_presentation", "save_presentation"}
+
+
 def serialize_per_presentation(app, store):
-    """Wrap every registered tool so calls holding the same presentation_id
-    are serialized on that deck's lock (python-pptx is not thread-safe).
+    """Wrap every registered tool so that (a) calls holding the same
+    presentation_id are serialized on that deck's lock (python-pptx is not
+    thread-safe) and (b) successful editing calls mark the deck as needing
+    visual inspection before its next export (see export gate in
+    tools/presentation_tools.py).
 
     Uses the FastMCP 1.x tool registry (mcp[cli] is pinned <2.0 in
     requirements.txt); degrades to a no-op with a warning if the SDK's
@@ -108,13 +136,21 @@ def serialize_per_presentation(app, store):
               "are not serialized.")
         return
 
-    def wrap(fn):
+    def wrap(name, fn, read_only):
+        marks_dirty = not read_only and name not in _NON_EDITING_TOOLS
+
         def wrapper(*args, **kwargs):
             pres_id = kwargs.get("presentation_id")
             with store.lock_for(pres_id):
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
+            if (marks_dirty and pres_id is not None
+                    and not (isinstance(result, dict) and "error" in result)):
+                store.mark_dirty(pres_id)
+            return result
         wrapper.__name__ = getattr(fn, "__name__", "tool")
         return wrapper
 
-    for tool in tools.values():
-        tool.fn = wrap(tool.fn)
+    for name, tool in tools.items():
+        annotations = getattr(tool, "annotations", None)
+        read_only = bool(annotations and getattr(annotations, "readOnlyHint", False))
+        tool.fn = wrap(name, tool.fn, read_only)

@@ -9,6 +9,47 @@ from mcp.types import ToolAnnotations
 import utils as ppt_utils
 
 
+def _visual_qa_gate(presentations, pres_id):
+    """Automatic visual QA before a deck leaves the server (export or save).
+
+    Runs only when the vision LLM is configured (see visual_qa.py) and the
+    deck was edited since its last passed inspection. Returns None to let the
+    export proceed, or the refusal dict to return to the caller.
+    """
+    import visual_qa
+
+    if not visual_qa.enforcement_enabled():
+        return None
+    if not presentations.is_dirty(pres_id):
+        return None
+    try:
+        verdict = visual_qa.inspect_presentation(presentations[pres_id])
+    except visual_qa.VisualQAError as e:
+        if visual_qa.fail_open_on_error():
+            return None
+        return {
+            "error": f"Automatic visual inspection could not run ({e}). "
+                     "The export was blocked; fix the inspection setup, or "
+                     "set VISUAL_QA_ON_ERROR=allow to export uninspected."
+        }
+    if verdict.get("passed") is True:
+        presentations.clear_dirty(pres_id)
+        return None
+    refusal = {
+        "error": "Automatic visual inspection FAILED — the presentation was "
+                 "not exported.",
+        "issues": verdict.get("issues", []),
+        "slides_reviewed": verdict.get("slides_reviewed"),
+        "message": "Fix the reported issues with the editing tools, then "
+                   "retry the export; it is re-inspected automatically and "
+                   "will succeed once the deck passes.",
+    }
+    for key in ("raw_review", "note"):
+        if key in verdict:
+            refusal[key] = verdict[key]
+    return refusal
+
+
 def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories):
     """Register presentation management tools with the FastMCP app"""
     
@@ -127,7 +168,11 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             return {
                 "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
-        
+
+        refusal = _visual_qa_gate(presentations, pres_id)
+        if refusal is not None:
+            return refusal
+
         # Save the presentation
         try:
             saved_path = ppt_utils.save_presentation(presentations[pres_id], file_path)
@@ -261,8 +306,11 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         """Export the presentation to DIAL file storage and return its file URL.
 
         Use this (not save_presentation) to deliver the finished deck to the
-        user. ALWAYS include the returned file_url in your final answer as an
-        attachment so the user can download the presentation.
+        user. When visual QA is enabled on the server, the deck is
+        automatically inspected first and a failing deck is refused with the
+        issue list — fix the issues and retry. ALWAYS include the returned
+        file_url in your final answer as an attachment so the user can
+        download the presentation.
         """
         from dial_client import DialFileClient, DialConfigError, PPTX_MIME
 
@@ -270,6 +318,11 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             return {
                 "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
             }
+
+        refusal = _visual_qa_gate(presentations, presentation_id)
+        if refusal is not None:
+            return refusal
+
         pres = presentations[presentation_id]
 
         if not filename.lower().endswith(".pptx"):
