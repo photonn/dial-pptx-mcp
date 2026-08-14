@@ -345,15 +345,22 @@ def _transport_security_for(host: str):
     421-rejects any remote Host header (e.g. Kubernetes service DNS names)
     once the server binds a non-loopback address.
 
-    - PPT_MCP_ALLOWED_HOSTS set (comma-separated hostnames): protection is ON
-      and exactly those hosts (any port) plus localhost are accepted.
-    - Unset + non-loopback bind: protection is DISABLED — the standard posture
-      for a network service that is fronted by ingress/service routing.
-    - Unset + loopback bind: keep FastMCP's localhost-only default (None).
+    - PPT_MCP_ALLOWED_HOSTS (comma-separated hostnames; default
+      dial-pptx-mcp.dial.svc.cluster.local — the standard in-cluster service
+      name): protection is ON and exactly those hosts (any port) plus
+      localhost are accepted.
+    - PPT_MCP_ALLOWED_HOSTS=*: protection is DISABLED (any Host accepted) —
+      for deployments fronted by ingress/service routing under other names.
+    - Loopback bind with the value unset: keep FastMCP's localhost-only
+      default (None).
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
-    allowed = os.environ.get("PPT_MCP_ALLOWED_HOSTS", "").strip()
+    default = ("" if host in ("127.0.0.1", "localhost", "::1")
+               else "dial-pptx-mcp.dial.svc.cluster.local")
+    allowed = os.environ.get("PPT_MCP_ALLOWED_HOSTS", default).strip()
+    if allowed == "*":
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     if allowed:
         hosts = []
         for h in allowed.split(","):
@@ -363,8 +370,6 @@ def _transport_security_for(host: str):
         hosts += ["127.0.0.1:*", "localhost:*", "[::1]:*"]
         return TransportSecuritySettings(
             enable_dns_rebinding_protection=True, allowed_hosts=hosts)
-    if host not in ("127.0.0.1", "localhost", "::1"):
-        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
     return None
 
 
