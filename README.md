@@ -92,8 +92,8 @@ When a vision LLM is configured (`VISION_LLM_*`), quality assurance is **entirel
 
 1. All slides are rendered (LibreOffice → PDF → PNG) and reviewed by the vision LLM for template/brand fidelity and visible errors (overflowing or clipped text, overlaps, unfilled placeholders, broken charts, illegibility).
 2. If issues are found, the server **repairs the deck itself**: the LLM is shown the issues, the affected slides' structure, and their images, and returns a plan of whitelisted operations (move/resize shape, set font size, set text, word wrap, delete shape) that are validated and applied with python-pptx.
-3. The deck is re-rendered and re-inspected; the loop repeats up to `VISUAL_QA_MAX_ITERATIONS` (default 3) inspections, stopping early if no repair makes progress.
-4. Only a deck that passes is exported. If the loop cannot reach a pass, the export fails with the unresolved issues (a genuine failure report, not a retry request); `VISUAL_QA_ON_UNRESOLVED=export` instead ships the best-effort deck.
+3. The deck is re-rendered and re-inspected; the loop repeats up to `VISUAL_QA_MAX_ITERATIONS` (default 10) inspections, stopping early if no repair makes progress.
+4. Only a deck that passes is exported. `VISUAL_QA_ON_UNRESOLVED` controls what happens if the loop cannot reach a pass: `report` (default) fails the export with the unresolved issue list — a genuine failure report, not a retry request — while `export_as_is` ships the best-effort deck anyway.
 
 Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. Any endpoint speaking the OpenAI Responses API with image input works (Azure OpenAI included). Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
 

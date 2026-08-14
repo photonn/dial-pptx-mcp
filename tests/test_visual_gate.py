@@ -63,8 +63,18 @@ class TestGateVerdicts(GateTestCase):
         self.assertEqual(refusal["unresolved_issues"][0]["slide"], 1)
         self.assertTrue(self.store.is_dirty(self.pid))
 
+    def test_unresolved_policy_values(self):
+        self.assertEqual(visual_qa.unresolved_policy(), "report")
+        for value in ("export", "export_as_is", "EXPORT_AS_IS"):
+            os.environ["VISUAL_QA_ON_UNRESOLVED"] = value
+            self.assertEqual(visual_qa.unresolved_policy(), "export_as_is")
+        for value in ("block", "report", "nonsense"):
+            os.environ["VISUAL_QA_ON_UNRESOLVED"] = value
+            self.assertEqual(visual_qa.unresolved_policy(), "report")
+        os.environ.pop("VISUAL_QA_ON_UNRESOLVED")
+
     def test_unresolved_can_export_when_configured(self):
-        os.environ["VISUAL_QA_ON_UNRESOLVED"] = "export"
+        os.environ["VISUAL_QA_ON_UNRESOLVED"] = "export_as_is"
         try:
             outcome = {"passed": False, "iterations": 3, "repair_rounds": [],
                        "issues": [{"slide": 1}]}

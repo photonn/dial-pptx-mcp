@@ -202,6 +202,15 @@ def enforcement_enabled() -> bool:
         "VISUAL_QA_ENFORCE", "true").lower() != "false"
 
 
+def unresolved_policy() -> str:
+    """What to do when the internal repair loop exhausts its iterations
+    without a pass: "report" (default — the export fails with the unresolved
+    issue list) or "export_as_is" (ship the best-effort deck).
+    VISUAL_QA_ON_UNRESOLVED accepts report/block and export_as_is/export."""
+    value = os.environ.get("VISUAL_QA_ON_UNRESOLVED", "report").lower()
+    return "export_as_is" if value in ("export", "export_as_is") else "report"
+
+
 def fail_open_on_error() -> bool:
     """VISUAL_QA_ON_ERROR=allow lets exports through when inspection itself
     fails (renderer missing, endpoint down). Default is to block."""
@@ -258,7 +267,7 @@ def inspect_and_repair(pres) -> dict:
 
     llm = VisionLLM()
     max_slides = int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
-    max_iterations = max(1, int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "3")))
+    max_iterations = max(1, int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10")))
 
     repair_rounds = []
     verdict = {}

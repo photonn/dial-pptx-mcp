@@ -145,9 +145,13 @@ class TestInspectAndRepairLoop(unittest.TestCase):
                    "issues": [{"slide": 1, "description": "x"}]}
         plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                  "size_pt": 20}]
-        outcome, calls = self._run([failing], [plan])
+        os.environ["VISUAL_QA_MAX_ITERATIONS"] = "3"
+        try:
+            outcome, calls = self._run([failing], [plan])
+        finally:
+            os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
         self.assertFalse(outcome["passed"])
-        self.assertEqual(calls["review"], 3)   # VISUAL_QA_MAX_ITERATIONS default
+        self.assertEqual(calls["review"], 3)
         self.assertEqual(len(outcome["repair_rounds"]), 2)
         self.assertTrue(outcome["issues"])
 

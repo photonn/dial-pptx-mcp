@@ -19,8 +19,6 @@ def _visual_qa_gate(presentations, pres_id):
     edited since it last passed. Returns None to let the export proceed, or
     an error dict when QA could not verify the deck.
     """
-    import os
-
     import visual_qa
 
     if not visual_qa.enforcement_enabled():
@@ -40,7 +38,7 @@ def _visual_qa_gate(presentations, pres_id):
     if outcome["passed"]:
         presentations.clear_dirty(pres_id)
         return None
-    if os.environ.get("VISUAL_QA_ON_UNRESOLVED", "block").lower() == "export":
+    if visual_qa.unresolved_policy() == "export_as_is":
         return None  # operator chose to ship best-effort decks
     refusal = {
         "error": "Automatic visual QA could not bring the presentation to a "
