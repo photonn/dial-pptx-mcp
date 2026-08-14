@@ -52,6 +52,42 @@ def _incoming_request_headers():
         return {}
 
 
+def resolve_dial_auth_headers(api_key=None):
+    """Resolve DIAL credentials per DIAL_AUTH_MODE (shared by the Files API
+    client and the DIAL-routed vision LLM):
+
+    - "auto" (default): credentials on the incoming MCP request first
+      (the user's bearer, which DIAL Quick Apps attaches when this server
+      is deployed behind the DIAL host — operations then run as the
+      caller), falling back to DIAL_API_KEY.
+    - "caller": incoming request credentials ONLY; error out rather than
+      fall back to a shared identity.
+    - "server": always DIAL_API_KEY.
+    """
+    mode = os.environ.get("DIAL_AUTH_MODE", "auto").lower()
+    incoming = _incoming_request_headers()
+    if mode != "server":
+        for name in ("api-key", "authorization"):
+            if name in incoming:
+                return {name: incoming[name]}
+        if mode == "caller":
+            raise DialConfigError(
+                "No caller credentials on this request. DIAL_AUTH_MODE="
+                "caller requires the user's Api-Key/Authorization header, "
+                "which DIAL Quick Apps forwards only to MCP servers "
+                "deployed under the DIAL host — deploy this server behind "
+                "DIAL Core routing, or set DIAL_AUTH_MODE=auto/server to "
+                "allow the shared DIAL_API_KEY."
+            )
+    api_key = api_key or os.environ.get("DIAL_API_KEY")
+    if api_key:
+        return {"Api-Key": api_key}
+    raise DialConfigError(
+        "No DIAL credentials: the caller forwarded no Api-Key/Authorization "
+        "header and DIAL_API_KEY is not set on the server."
+    )
+
+
 class DialFileClient:
     def __init__(self, base_url=None, api_key=None, timeout=60.0):
         base_url = base_url or os.environ.get("DIAL_CORE_URL")
@@ -65,37 +101,7 @@ class DialFileClient:
         self._timeout = timeout
 
     def _auth_headers(self):
-        """Resolve DIAL credentials per DIAL_AUTH_MODE:
-
-        - "auto" (default): credentials on the incoming MCP request first
-          (the user's bearer, which DIAL Quick Apps attaches when this
-          server is deployed behind the DIAL host — uploads then land in
-          the caller's own bucket), falling back to DIAL_API_KEY.
-        - "caller": incoming request credentials ONLY; error out rather
-          than fall back to a shared identity.
-        - "server": always DIAL_API_KEY (single shared bucket).
-        """
-        mode = os.environ.get("DIAL_AUTH_MODE", "auto").lower()
-        incoming = _incoming_request_headers()
-        if mode != "server":
-            for name in ("api-key", "authorization"):
-                if name in incoming:
-                    return {name: incoming[name]}
-            if mode == "caller":
-                raise DialConfigError(
-                    "No caller credentials on this request. DIAL_AUTH_MODE="
-                    "caller requires the user's Api-Key/Authorization header, "
-                    "which DIAL Quick Apps forwards only to MCP servers "
-                    "deployed under the DIAL host — deploy this server behind "
-                    "DIAL Core routing, or set DIAL_AUTH_MODE=auto/server to "
-                    "allow the shared DIAL_API_KEY."
-                )
-        if self._api_key:
-            return {"Api-Key": self._api_key}
-        raise DialConfigError(
-            "No DIAL credentials: the caller forwarded no Api-Key/Authorization "
-            "header and DIAL_API_KEY is not set on the server."
-        )
+        return resolve_dial_auth_headers(self._api_key)
 
     def get_bucket(self):
         headers = self._auth_headers()

@@ -103,19 +103,56 @@ class VisionLLMConfigError(VisualQAError):
     pass
 
 
+def _resolve_provider() -> str:
+    """Which backend serves the vision LLM:
+    - "direct": VISION_LLM_ENDPOINT + VISION_LLM_API_KEY (OpenAI Responses
+      API, Azure OpenAI included) — the default whenever an endpoint is set.
+    - "dial": the model is a DIAL Core deployment, called at
+      {DIAL_CORE_URL}/openai/deployments/{model}/chat/completions with DIAL
+      credentials (caller headers first, DIAL_API_KEY fallback — the same
+      resolution as file storage).
+    VISION_LLM_PROVIDER=direct|dial overrides the inference."""
+    value = os.environ.get("VISION_LLM_PROVIDER", "").lower()
+    if value in ("direct", "azure", "openai"):
+        return "direct"
+    if value in ("dial", "dial-core", "dial_core"):
+        return "dial"
+    return "direct" if os.environ.get("VISION_LLM_ENDPOINT") else "dial"
+
+
 class VisionLLM:
     def __init__(self):
+        self.model = os.environ.get("VISION_LLM_MODEL")
+        self.provider = _resolve_provider()
         self.endpoint = os.environ.get("VISION_LLM_ENDPOINT")
         self.api_key = os.environ.get("VISION_LLM_API_KEY")
-        self.model = os.environ.get("VISION_LLM_MODEL")
-        if not (self.endpoint and self.api_key and self.model):
+        self.dial_url = os.environ.get("DIAL_CORE_URL")
+        if not self.model:
             raise VisionLLMConfigError(
-                "Visual inspection is not configured on this server: set "
-                "VISION_LLM_ENDPOINT, VISION_LLM_API_KEY and VISION_LLM_MODEL "
+                "Visual inspection is not configured: set VISION_LLM_MODEL "
                 "(see .env.example)."
+            )
+        if self.provider == "direct" and not (self.endpoint and self.api_key):
+            raise VisionLLMConfigError(
+                "Visual inspection (direct provider) needs VISION_LLM_ENDPOINT "
+                "and VISION_LLM_API_KEY (see .env.example)."
+            )
+        if self.provider == "dial" and not self.dial_url:
+            raise VisionLLMConfigError(
+                "Visual inspection (dial provider) needs DIAL_CORE_URL so the "
+                "model can be called as a DIAL deployment (see .env.example)."
             )
 
     def build_payload(self, images: list, prompt: str) -> dict:
+        if self.provider == "dial":
+            content = [{"type": "text", "text": prompt}]
+            for png in images:
+                b64 = base64.b64encode(png).decode()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
+            return {"messages": [{"role": "user", "content": content}]}
         content = [{"type": "input_text", "text": prompt}]
         for png in images:
             b64 = base64.b64encode(png).decode()
@@ -126,9 +163,41 @@ class VisionLLM:
         return {"model": self.model,
                 "input": [{"role": "user", "content": content}]}
 
-    @staticmethod
-    def extract_text(response_json: dict) -> str:
-        """Pull the assistant text out of a Responses API result."""
+    def _request_target(self):
+        """(url, headers) for the configured provider."""
+        if self.provider == "dial":
+            from dial_client import DialConfigError, resolve_dial_auth_headers
+            try:
+                headers = resolve_dial_auth_headers()
+            except DialConfigError as e:
+                raise VisionLLMConfigError(str(e))
+            headers["Content-Type"] = "application/json"
+            url = (f"{self.dial_url.rstrip('/')}/openai/deployments/"
+                   f"{self.model}/chat/completions")
+            api_version = os.environ.get("VISION_LLM_API_VERSION")
+            if api_version:
+                url += f"?api-version={api_version}"
+            return url, headers
+        return self.endpoint, {
+            "api-key": self.api_key,                       # Azure OpenAI
+            "Authorization": f"Bearer {self.api_key}",     # OpenAI-compatible
+            "Content-Type": "application/json",
+        }
+
+    def extract_text(self, response_json: dict) -> str:
+        """Pull the assistant text out of the provider's response."""
+        if self.provider == "dial":
+            try:
+                content = response_json["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                raise VisualQAError("Vision LLM returned no text output.")
+            if isinstance(content, list):  # multimodal content parts
+                content = "\n".join(
+                    c.get("text", "") for c in content
+                    if isinstance(c, dict) and c.get("type") == "text")
+            if not isinstance(content, str) or not content:
+                raise VisualQAError("Vision LLM returned no text output.")
+            return content
         if isinstance(response_json.get("output_text"), str):
             return response_json["output_text"]
         parts = []
@@ -161,12 +230,8 @@ class VisionLLM:
 
     def ask(self, images: list, prompt: str, timeout: float = 300.0) -> str:
         """Send prompt + images, return the model's raw text answer."""
-        headers = {
-            "api-key": self.api_key,                       # Azure OpenAI
-            "Authorization": f"Bearer {self.api_key}",     # OpenAI-compatible
-            "Content-Type": "application/json",
-        }
-        r = httpx.post(self.endpoint, headers=headers,
+        url, headers = self._request_target()
+        r = httpx.post(url, headers=headers,
                        json=self.build_payload(images, prompt), timeout=timeout)
         if r.status_code != 200:
             raise VisualQAError(
@@ -193,11 +258,16 @@ class VisionLLM:
 
 
 def enforcement_enabled() -> bool:
-    """Automatic visual QA is on when the vision LLM is configured, unless
-    explicitly disabled with VISUAL_QA_ENFORCE=false."""
-    configured = all(os.environ.get(k) for k in
-                     ("VISION_LLM_ENDPOINT", "VISION_LLM_API_KEY",
-                      "VISION_LLM_MODEL"))
+    """Automatic visual QA is on when the vision LLM is configured — either
+    directly (VISION_LLM_ENDPOINT + VISION_LLM_API_KEY) or as a DIAL Core
+    deployment (DIAL_CORE_URL) — unless disabled with VISUAL_QA_ENFORCE=false."""
+    if not os.environ.get("VISION_LLM_MODEL"):
+        return False
+    if _resolve_provider() == "direct":
+        configured = bool(os.environ.get("VISION_LLM_ENDPOINT")
+                          and os.environ.get("VISION_LLM_API_KEY"))
+    else:
+        configured = bool(os.environ.get("DIAL_CORE_URL"))
     return configured and os.environ.get(
         "VISUAL_QA_ENFORCE", "true").lower() != "false"
 

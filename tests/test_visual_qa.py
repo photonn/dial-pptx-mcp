@@ -57,7 +57,7 @@ class TestPayload(WithEnv):
 
 class TestResponseParsing(WithEnv):
     def test_extract_output_text_field(self):
-        self.assertEqual(VisionLLM.extract_text({"output_text": "hi"}), "hi")
+        self.assertEqual(VisionLLM().extract_text({"output_text": "hi"}), "hi")
 
     def test_extract_from_output_list(self):
         resp = {"output": [
@@ -65,7 +65,7 @@ class TestResponseParsing(WithEnv):
             {"type": "message", "content": [
                 {"type": "output_text", "text": '{"passed": true, "issues": []}'}]},
         ]}
-        self.assertIn("passed", VisionLLM.extract_text(resp))
+        self.assertIn("passed", VisionLLM().extract_text(resp))
 
     def test_parse_verdict_plain(self):
         v = VisionLLM.parse_verdict('{"passed": false, "issues": [{"slide": 2}]}')
@@ -80,6 +80,76 @@ class TestResponseParsing(WithEnv):
         v = VisionLLM.parse_verdict("The deck looks fine to me!")
         self.assertIsNone(v["passed"])
         self.assertIn("raw_review", v)
+
+
+class TestDialProvider(unittest.TestCase):
+    """VISION_LLM served through DIAL Core as a deployment."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in (
+            *ENV, "DIAL_CORE_URL", "DIAL_API_KEY", "VISION_LLM_PROVIDER")}
+        for k in self._saved:
+            os.environ.pop(k, None)
+        os.environ["VISION_LLM_MODEL"] = "vision-deployment"
+        os.environ["DIAL_CORE_URL"] = "https://dial.example.invalid"
+        os.environ["DIAL_API_KEY"] = "dial-key"
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_provider_autodetect(self):
+        llm = VisionLLM()  # no VISION_LLM_ENDPOINT -> dial
+        self.assertEqual(llm.provider, "dial")
+        os.environ["VISION_LLM_ENDPOINT"] = "https://x.invalid/responses"
+        os.environ["VISION_LLM_API_KEY"] = "k"
+        self.assertEqual(VisionLLM().provider, "direct")
+        os.environ["VISION_LLM_PROVIDER"] = "dial"
+        self.assertEqual(VisionLLM().provider, "dial")
+
+    def test_dial_payload_and_target(self):
+        llm = VisionLLM()
+        payload = llm.build_payload([b"\x89PNG-x"], "check")
+        content = payload["messages"][0]["content"]
+        self.assertEqual(content[0], {"type": "text", "text": "check"})
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertNotIn("model", payload)  # deployment is in the URL
+        url, headers = llm._request_target()
+        self.assertEqual(url, "https://dial.example.invalid/openai/"
+                              "deployments/vision-deployment/chat/completions")
+        self.assertEqual(headers["Api-Key"], "dial-key")
+
+    def test_dial_api_version(self):
+        os.environ["VISION_LLM_API_VERSION"] = "2025-01-01-preview"
+        try:
+            url, _ = VisionLLM()._request_target()
+            self.assertTrue(url.endswith("?api-version=2025-01-01-preview"))
+        finally:
+            os.environ.pop("VISION_LLM_API_VERSION")
+
+    def test_dial_extract_text(self):
+        llm = VisionLLM()
+        resp = {"choices": [{"message": {"content": '{"passed": true}'}}]}
+        self.assertEqual(llm.extract_text(resp), '{"passed": true}')
+        parts = {"choices": [{"message": {"content": [
+            {"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}]}
+        self.assertEqual(llm.extract_text(parts), "a\nb")
+
+    def test_dial_requires_core_url(self):
+        os.environ.pop("DIAL_CORE_URL")
+        from visual_qa import VisionLLMConfigError
+        with self.assertRaises(VisionLLMConfigError):
+            VisionLLM()
+
+    def test_enforcement_via_dial(self):
+        import visual_qa
+        self.assertTrue(visual_qa.enforcement_enabled())
+        os.environ.pop("DIAL_CORE_URL")
+        self.assertFalse(visual_qa.enforcement_enabled())
 
 
 class TestPrompt(unittest.TestCase):

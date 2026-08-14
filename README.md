@@ -33,9 +33,11 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
-| `VISION_LLM_ENDPOINT` | for visual QA | — | OpenAI Responses-API endpoint of a vision model, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. Unset → `visual_inspect_presentation` returns a clear error |
-| `VISION_LLM_API_KEY` | for visual QA | — | Key for that endpoint (sent as `api-key` and `Authorization: Bearer`) |
-| `VISION_LLM_MODEL` | for visual QA | — | Model / Azure deployment name; must accept image input |
+| `VISION_LLM_MODEL` | for visual QA | — | Vision model: the model name (direct endpoint) or the DIAL deployment name (DIAL provider); must accept image input |
+| `VISION_LLM_ENDPOINT` | direct provider | — | OpenAI Responses-API endpoint, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. When unset, the model is called through DIAL Core instead: `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` with DIAL credentials (caller headers first, `DIAL_API_KEY` fallback) |
+| `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
+| `VISION_LLM_PROVIDER` | no | auto | Force the backend: `direct` or `dial` (default: `direct` when `VISION_LLM_ENDPOINT` is set, else `dial`) |
+| `VISION_LLM_API_VERSION` | no | — | Optional `?api-version=` for the DIAL-routed call |
 | `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per inspection |
 | `SOFFICE_PATH` | no | `soffice` on PATH | LibreOffice binary used to render slides (the Docker image includes LibreOffice) |
 
@@ -97,7 +99,7 @@ When a vision LLM is configured (`VISION_LLM_*`), quality assurance is **entirel
 3. The deck is re-rendered and re-inspected; the loop repeats up to `VISUAL_QA_MAX_ITERATIONS` (default 10) inspections, stopping early if no repair makes progress.
 4. Only a deck that passes is exported. `VISUAL_QA_ON_UNRESOLVED` controls what happens if the loop cannot reach a pass: `report` (default) fails the export with the unresolved issue list — a genuine failure report, not a retry request — while `export_as_is` ships the best-effort deck anyway.
 
-Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. Any endpoint speaking the OpenAI Responses API with image input works (Azure OpenAI included). Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
+Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
 
 ## Multi-tenancy and scaling notes
 
