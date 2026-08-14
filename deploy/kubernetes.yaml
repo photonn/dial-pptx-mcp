@@ -1,0 +1,62 @@
+# Generic example manifests for dial-pptx-mcp.
+# Replace every <PLACEHOLDER> before applying; adapt to your ingress/IaC conventions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dial-pptx-mcp
+  labels:
+    app: dial-pptx-mcp
+spec:
+  # In-memory presentation state: keep 1 replica, or add session affinity
+  # at the ingress/service level before scaling out (see README).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dial-pptx-mcp
+  template:
+    metadata:
+      labels:
+        app: dial-pptx-mcp
+    spec:
+      containers:
+        - name: dial-pptx-mcp
+          image: <YOUR-REGISTRY>/dial-pptx-mcp:<TAG>
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PPT_MCP_TRANSPORT
+              value: "http"
+            - name: PPT_MCP_HOST
+              value: "0.0.0.0"
+            - name: PPT_MCP_PORT
+              value: "8000"
+            - name: DIAL_CORE_URL
+              value: "https://<YOUR-DIAL-CORE-HOST>"
+            - name: DIAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dial-pptx-mcp-secrets
+                  key: dial-api-key
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dial-pptx-mcp
+spec:
+  selector:
+    app: dial-pptx-mcp
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+# Example secret (create via your secret-management tooling instead of applying plaintext):
+# kubectl create secret generic dial-pptx-mcp-secrets --from-literal=dial-api-key=<YOUR-DIAL-API-KEY>
