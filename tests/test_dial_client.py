@@ -55,12 +55,15 @@ class TestDialFileClient(unittest.TestCase):
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         os.environ["DIAL_CORE_URL"] = f"http://127.0.0.1:{cls.port}"
         os.environ["DIAL_API_KEY"] = "test-key"
+        # No MCP request context in unit tests: allow the env-key fallback
+        os.environ["DIAL_AUTH_MODE"] = "auto"
 
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
         os.environ.pop("DIAL_CORE_URL", None)
         os.environ.pop("DIAL_API_KEY", None)
+        os.environ.pop("DIAL_AUTH_MODE", None)
 
     def test_bucket_and_upload(self):
         from dial_client import DialFileClient
@@ -98,6 +101,28 @@ class TestDialFileClient(unittest.TestCase):
         from dial_client import DialFileClient, DialConfigError
         with self.assertRaises(DialConfigError):
             DialFileClient().download("https://evil.example.com/files/x/y.pptx")
+
+    def test_caller_mode_refuses_env_fallback(self):
+        from dial_client import DialFileClient, DialConfigError
+        os.environ["DIAL_AUTH_MODE"] = "caller"
+        try:
+            with self.assertRaises(DialConfigError) as ctx:
+                DialFileClient().get_bucket()
+            self.assertIn("No caller credentials", str(ctx.exception))
+        finally:
+            os.environ["DIAL_AUTH_MODE"] = "auto"
+
+    def test_caller_mode_uses_incoming_headers(self):
+        from unittest.mock import patch
+        import dial_client
+        from dial_client import DialFileClient
+        os.environ["DIAL_AUTH_MODE"] = "caller"
+        try:
+            with patch.object(dial_client, "_incoming_request_headers",
+                              return_value={"api-key": "test-key"}):
+                self.assertEqual(DialFileClient().get_bucket(), "STUBBUCKET")
+        finally:
+            os.environ["DIAL_AUTH_MODE"] = "auto"
 
 
 class TestTemplateContentDecoding(unittest.TestCase):

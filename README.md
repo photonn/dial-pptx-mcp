@@ -27,7 +27,8 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_HOST` | no | `127.0.0.1` | Bind address; set `0.0.0.0` in containers (the Dockerfile does) |
 | `PPT_MCP_PORT` | no | `8000` | Listen port for http/sse |
 | `DIAL_CORE_URL` | for DIAL export | — | Base URL of DIAL Core, e.g. `https://dial.example.com`. Unset → DIAL upload/download tools return a clear error; local-path tools still work |
-| `DIAL_API_KEY` | no | — | Fallback DIAL API key when the caller forwards no credentials. If Quick Apps forwards the user's `Api-Key`/`Authorization` header to this toolset, that identity is used instead and exports land in the caller's own bucket |
+| `DIAL_AUTH_MODE` | no | `caller` | `caller`: file operations use ONLY the credentials on the incoming MCP request (the end user's bearer, attached by Quick Apps for servers deployed under the DIAL host) — every export lands in that user's own bucket, and the export fails loudly if no caller credentials arrived. `auto`: caller credentials when present, else `DIAL_API_KEY`. `server`: always `DIAL_API_KEY` (single shared bucket — dev/testing only) |
+| `DIAL_API_KEY` | no | — | Server's own DIAL API key, used only in `auto`/`server` modes |
 | `DIAL_UPLOAD_FOLDER` | no | `pptx-mcp` | Folder inside the bucket for exported decks |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
@@ -83,6 +84,7 @@ Register the deployed server as an MCP tool set in your Quick App manifest:
 ```
 
 - `propagate_types_to_choice` makes the exported `.pptx` attachment visible to the end user in DIAL Chat (tool-call results are hidden by default).
+- **Deploy the server under the DIAL host** (behind DIAL Core routing). Quick Apps attaches the end user's `Authorization: Bearer` only to MCP servers whose URL starts with the DIAL host — that bearer is what makes exports land in each user's own bucket (`DIAL_AUTH_MODE=caller`, the default). For a server at an external URL, Quick Apps sends no user credentials (it deliberately refuses to forward `api-key`/`authorization` as custom headers), and per-user bucket isolation is impossible — exports then need `DIAL_AUTH_MODE=auto`/`server` and land in the server's single bucket.
 - **Template input**: the orchestrating agent passes the template to `create_presentation_from_template_content` as `file:data::files/{bucket}/{path}` — Quick Apps' file preprocessing resolves that reference to a data: URI before this server receives it (base64 via `file:base64::` also accepted). Note Quick Apps' default 10 MiB file-loading limit (`features.file_loading.size_limit`) if your templates are large.
 - **Deck output**: `export_presentation` uploads to DIAL file storage and returns the `files/{bucket}/{path}` URL; the tool description instructs the agent to include it in its final answer.
 
