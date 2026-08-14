@@ -67,15 +67,15 @@ class DialFileClient:
     def _auth_headers(self):
         """Resolve DIAL credentials per DIAL_AUTH_MODE:
 
-        - "caller" (default): use ONLY the credentials on the incoming MCP
-          request (the user's bearer, which DIAL Quick Apps attaches when
-          this server is deployed behind the DIAL host) — every file
-          operation then runs as the end user and lands in their own
-          bucket; error out rather than fall back to a shared identity.
-        - "auto": caller credentials when present, else DIAL_API_KEY.
-        - "server": always DIAL_API_KEY (single shared bucket — dev only).
+        - "auto" (default): credentials on the incoming MCP request first
+          (the user's bearer, which DIAL Quick Apps attaches when this
+          server is deployed behind the DIAL host — uploads then land in
+          the caller's own bucket), falling back to DIAL_API_KEY.
+        - "caller": incoming request credentials ONLY; error out rather
+          than fall back to a shared identity.
+        - "server": always DIAL_API_KEY (single shared bucket).
         """
-        mode = os.environ.get("DIAL_AUTH_MODE", "caller").lower()
+        mode = os.environ.get("DIAL_AUTH_MODE", "auto").lower()
         incoming = _incoming_request_headers()
         if mode != "server":
             for name in ("api-key", "authorization"):
