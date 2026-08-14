@@ -11,4 +11,10 @@ wheels/
 *.bak
 test/
 .DS_Store
-CLAUDE.md
+CLAUDE.md.venv/
+__pycache__/
+*.pyc
+
+# Local test templates and spike outputs — never commit customer/corporate decks
+spike/*.pptx
+templates-local/
