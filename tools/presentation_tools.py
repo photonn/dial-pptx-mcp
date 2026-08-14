@@ -231,13 +231,13 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             }
         if not raw.startswith(b"PK"):
             return {
-                "error": "Decoded template_content is not a .pptx file "
+                "error": "Decoded template_content is not a .pptx/.potx file "
                          "(expected a ZIP/OOXML container)."
             }
 
         try:
-            from pptx import Presentation
-            pres = Presentation(io.BytesIO(raw))
+            # Handles .pptx directly and .potx via content-type coercion
+            pres = ppt_utils.open_presentation_bytes(raw)
         except Exception as e:
             return {"error": f"Failed to open template: {str(e)}"}
 

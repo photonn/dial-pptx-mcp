@@ -4,7 +4,49 @@ Functions for creating, opening, saving, and managing presentations.
 """
 from pptx import Presentation
 from typing import Dict, List, Optional
+import io
 import os
+import zipfile
+
+# OOXML content types for the main presentation part. A .potx template is
+# structurally identical to a .pptx except for this declaration, which makes
+# python-pptx reject it outright — so we rewrite it and open normally.
+_TEMPLATE_MAIN_CT = "application/vnd.openxmlformats-officedocument.presentationml.template.main+xml"
+_SLIDESHOW_MAIN_CT = "application/vnd.openxmlformats-officedocument.presentationml.slideshow.main+xml"
+_PRESENTATION_MAIN_CT = "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+
+
+def coerce_template_bytes_to_presentation(data: bytes) -> bytes:
+    """If data is a .potx/.ppsx package, return a copy whose main part is
+    declared as a regular presentation; otherwise return data unchanged.
+
+    Only [Content_Types].xml is rewritten — every other part (theme, masters,
+    layouts, media) is copied byte-for-byte, so template fidelity is
+    unaffected.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as zin:
+        try:
+            cts = zin.read("[Content_Types].xml").decode("utf-8")
+        except KeyError:
+            return data
+        if _TEMPLATE_MAIN_CT not in cts and _SLIDESHOW_MAIN_CT not in cts:
+            return data
+        cts = cts.replace(_TEMPLATE_MAIN_CT, _PRESENTATION_MAIN_CT)
+        cts = cts.replace(_SLIDESHOW_MAIN_CT, _PRESENTATION_MAIN_CT)
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename == "[Content_Types].xml":
+                    zout.writestr(item, cts)
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+        return out.getvalue()
+
+
+def open_presentation_bytes(data: bytes) -> Presentation:
+    """Open presentation bytes (.pptx, or .potx/.ppsx via content-type
+    coercion) as a Presentation."""
+    return Presentation(io.BytesIO(coerce_template_bytes_to_presentation(data)))
 
 
 def create_presentation() -> Presentation:
@@ -51,9 +93,10 @@ def create_presentation_from_template(template_path: str) -> Presentation:
         raise ValueError("Template file must be a .pptx or .potx file")
     
     try:
-        # Load the template file as a presentation
-        presentation = Presentation(template_path)
-        return presentation
+        # Load the template file as a presentation (.potx is converted
+        # in-memory to a regular presentation package first)
+        with open(template_path, "rb") as f:
+            return open_presentation_bytes(f.read())
     except Exception as e:
         raise Exception(f"Failed to load template file '{template_path}': {str(e)}")
 
