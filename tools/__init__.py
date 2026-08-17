@@ -14,8 +14,10 @@ from .connector_tools import register_connector_tools
 from .master_tools import register_master_tools
 from .transition_tools import register_transition_tools
 from .visual_tools import register_visual_tools
+from .batch_tools import register_batch_tools
 
 __all__ = [
+    "register_batch_tools",
     "register_visual_tools",
     "register_presentation_tools",
     "register_content_tools", 

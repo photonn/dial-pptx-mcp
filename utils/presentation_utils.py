@@ -43,6 +43,23 @@ def coerce_template_bytes_to_presentation(data: bytes) -> bytes:
         return out.getvalue()
 
 
+def remove_all_slides(presentation: Presentation) -> int:
+    """Delete every existing slide, keeping theme, masters and layouts intact.
+
+    Corporate templates often ship example slides; a generated deck must not
+    inherit them. Returns the number of slides removed.
+    """
+    slide_id_list = presentation.slides._sldIdLst
+    entries = list(slide_id_list)
+    for entry in entries:
+        rId = entry.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+        if rId:
+            presentation.part.drop_rel(rId)
+        slide_id_list.remove(entry)
+    return len(entries)
+
+
 def open_presentation_bytes(data: bytes) -> Presentation:
     """Open presentation bytes (.pptx, or .potx/.ppsx via content-type
     coercion) as a Presentation."""

@@ -17,6 +17,10 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 
 The ~30 upstream content/formatting tools (slides, text, charts, tables, connectors, hyperlinks, masters, transitions) are unchanged — see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) for the full tool reference.
 
+### `build_presentation` — one call per deck
+
+Orchestrators cap LLM operations per user request (DIAL Quick Apps: `max_iterations`, default **15**), so building a deck one tool call per slide runs out of iterations and the agent stops with *"Agent stopped due to max iterations"*. `build_presentation` avoids that by doing everything in a single call: it takes the whole deck as a list of slide specs (`title`, `bullets` or `body_text`, `notes`, `layout_index`), an optional template (`.pptx`/`.potx` as base64/data URI), optional document properties, and exports to DIAL by default — returning the `file_url` plus a `presentation_id` for any follow-up edits with the granular tools. Template example slides are dropped by default (`keep_template_slides=true` keeps them); theme, layouts, masters and branding are always preserved.
+
 ## Configuration
 
 All environment-specific settings come from environment variables. Nothing is hardcoded.
