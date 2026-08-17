@@ -104,8 +104,9 @@ class VisionLLMConfigError(VisualQAError):
 
 
 # Azure OpenAI (and DIAL Core's Azure upstream) require an api-version on
-# every request. Overridable with VISION_LLM_API_VERSION.
-DEFAULT_API_VERSION = "2024-10-21"
+# every request. This preview version covers both the Responses API and
+# chat completions with image input. Overridable with VISION_LLM_API_VERSION.
+DEFAULT_API_VERSION = "2025-04-01-preview"
 
 
 def _with_api_version(url: str) -> str:

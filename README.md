@@ -38,7 +38,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_ENDPOINT` | direct provider | — | OpenAI Responses-API endpoint, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. When unset, the model is called through DIAL Core instead: `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` with DIAL credentials (caller headers first, `DIAL_API_KEY` fallback) |
 | `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
 | `VISION_LLM_PROVIDER` | no | auto | Force the backend: `direct` or `dial` (default: `direct` when `VISION_LLM_ENDPOINT` is set, else `dial`) |
-| `VISION_LLM_API_VERSION` | no | `2024-10-21` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. An `api-version` already present in `VISION_LLM_ENDPOINT` always wins; note the Responses API needs a preview version such as `2025-04-01-preview` |
+| `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
 | `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per inspection |
 | `SOFFICE_PATH` | no | `soffice` on PATH | LibreOffice binary used to render slides (the Docker image includes LibreOffice) |
 
