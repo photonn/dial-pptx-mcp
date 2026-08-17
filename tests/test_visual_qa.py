@@ -119,8 +119,12 @@ class TestDialProvider(unittest.TestCase):
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
         self.assertNotIn("model", payload)  # deployment is in the URL
         url, headers = llm._request_target()
+        # api-version is always sent: Azure (and DIAL's Azure upstream)
+        # reject requests without it.
+        from visual_qa import DEFAULT_API_VERSION
         self.assertEqual(url, "https://dial.example.invalid/openai/"
-                              "deployments/vision-deployment/chat/completions")
+                              "deployments/vision-deployment/chat/completions"
+                              f"?api-version={DEFAULT_API_VERSION}")
         self.assertEqual(headers["Api-Key"], "dial-key")
 
     def test_dial_api_version(self):
@@ -128,6 +132,29 @@ class TestDialProvider(unittest.TestCase):
         try:
             url, _ = VisionLLM()._request_target()
             self.assertTrue(url.endswith("?api-version=2025-01-01-preview"))
+        finally:
+            os.environ.pop("VISION_LLM_API_VERSION")
+
+    def test_direct_endpoint_gets_api_version_when_missing(self):
+        from visual_qa import DEFAULT_API_VERSION
+        os.environ["VISION_LLM_PROVIDER"] = "direct"
+        os.environ["VISION_LLM_ENDPOINT"] = "https://x.invalid/openai/responses"
+        os.environ["VISION_LLM_API_KEY"] = "k"
+        url, _ = VisionLLM()._request_target()
+        self.assertEqual(url, "https://x.invalid/openai/responses"
+                              f"?api-version={DEFAULT_API_VERSION}")
+
+    def test_configured_api_version_in_url_wins(self):
+        os.environ["VISION_LLM_PROVIDER"] = "direct"
+        os.environ["VISION_LLM_ENDPOINT"] = (
+            "https://x.invalid/openai/responses?api-version=2025-04-01-preview")
+        os.environ["VISION_LLM_API_KEY"] = "k"
+        os.environ["VISION_LLM_API_VERSION"] = "2020-01-01"
+        try:
+            url, _ = VisionLLM()._request_target()
+            self.assertEqual(
+                url,
+                "https://x.invalid/openai/responses?api-version=2025-04-01-preview")
         finally:
             os.environ.pop("VISION_LLM_API_VERSION")
 

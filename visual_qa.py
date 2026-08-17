@@ -103,6 +103,30 @@ class VisionLLMConfigError(VisualQAError):
     pass
 
 
+# Azure OpenAI (and DIAL Core's Azure upstream) require an api-version on
+# every request. Overridable with VISION_LLM_API_VERSION.
+DEFAULT_API_VERSION = "2024-10-21"
+
+
+def _with_api_version(url: str) -> str:
+    """Ensure the request URL carries an ?api-version= query parameter.
+
+    Azure OpenAI rejects requests without it ("api-version is a required
+    query parameter"), and DIAL Core passes the parameter through to its
+    Azure upstream, so both providers need it. A version already present in
+    the configured URL always wins; otherwise VISION_LLM_API_VERSION (or the
+    default) is appended.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    if "api-version" in parse_qs(urlparse(url).query):
+        return url
+    version = os.environ.get("VISION_LLM_API_VERSION", DEFAULT_API_VERSION).strip()
+    if not version:
+        return url
+    return f"{url}{'&' if urlparse(url).query else '?'}api-version={version}"
+
+
 def _resolve_provider() -> str:
     """Which backend serves the vision LLM:
     - "direct": VISION_LLM_ENDPOINT + VISION_LLM_API_KEY (OpenAI Responses
@@ -174,11 +198,8 @@ class VisionLLM:
             headers["Content-Type"] = "application/json"
             url = (f"{self.dial_url.rstrip('/')}/openai/deployments/"
                    f"{self.model}/chat/completions")
-            api_version = os.environ.get("VISION_LLM_API_VERSION")
-            if api_version:
-                url += f"?api-version={api_version}"
-            return url, headers
-        return self.endpoint, {
+            return _with_api_version(url), headers
+        return _with_api_version(self.endpoint), {
             "api-key": self.api_key,                       # Azure OpenAI
             "Authorization": f"Bearer {self.api_key}",     # OpenAI-compatible
             "Content-Type": "application/json",
@@ -234,9 +255,13 @@ class VisionLLM:
         r = httpx.post(url, headers=headers,
                        json=self.build_payload(images, prompt), timeout=timeout)
         if r.status_code != 200:
+            detail = r.text[:300]
+            if "api-version" in detail:
+                detail += (" — set VISION_LLM_API_VERSION to a version your "
+                           "endpoint accepts (or put ?api-version=... in "
+                           "VISION_LLM_ENDPOINT).")
             raise VisualQAError(
-                f"Vision LLM request failed with HTTP {r.status_code}: "
-                + r.text[:300]
+                f"Vision LLM request failed with HTTP {r.status_code}: {detail}"
             )
         return self.extract_text(r.json())
 
