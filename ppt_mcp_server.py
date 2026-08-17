@@ -25,8 +25,7 @@ from tools import (
     register_connector_tools,
     register_master_tools,
     register_transition_tools,
-    register_visual_tools,
-    register_batch_tools
+    register_visual_tools
 )
 
 # Initialize the FastMCP server
@@ -288,11 +287,6 @@ register_transition_tools(
 )
 
 register_visual_tools(
-    app,
-    presentations
-)
-
-register_batch_tools(
     app,
     presentations
 )

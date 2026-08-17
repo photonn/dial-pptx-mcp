@@ -57,48 +57,6 @@ def _visual_qa_gate(presentations, pres_id):
     return refusal
 
 
-def export_via_dial(presentations, presentation_id: str,
-                    filename: str = "presentation.pptx") -> Dict:
-    """Run the visual-QA gate and upload the deck to DIAL file storage.
-
-    Shared by the export_presentation tool and the batch build tool so both
-    paths get identical QA enforcement and upload behavior.
-    """
-    import io
-
-    from dial_client import DialFileClient, DialConfigError, PPTX_MIME
-
-    if presentation_id not in presentations:
-        return {
-            "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
-        }
-
-    refusal = _visual_qa_gate(presentations, presentation_id)
-    if refusal is not None:
-        return refusal
-
-    pres = presentations[presentation_id]
-    if not filename.lower().endswith(".pptx"):
-        filename += ".pptx"
-
-    try:
-        buf = io.BytesIO()
-        pres.save(buf)
-        client = DialFileClient()
-        file_url = client.upload(buf.getvalue(), filename)
-        return {
-            "message": f"Presentation exported to DIAL file storage: {file_url}. "
-                       "Include this file URL in your final answer.",
-            "file_url": file_url,
-            "mime_type": PPTX_MIME,
-            "size_bytes": buf.getbuffer().nbytes
-        }
-    except DialConfigError as e:
-        return {"error": str(e)}
-    except Exception as e:
-        return {"error": f"Failed to export presentation to DIAL: {str(e)}"}
-
-
 def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories):
     """Register presentation management tools with the FastMCP app"""
     
@@ -361,7 +319,39 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         file_url in your final answer as an attachment so the user can
         download the presentation.
         """
-        return export_via_dial(presentations, presentation_id, filename)
+        from dial_client import DialFileClient, DialConfigError, PPTX_MIME
+
+        if presentation_id not in presentations:
+            return {
+                "error": "Unknown or expired presentation_id. Pass the presentation_id returned by create_presentation, create_presentation_from_template, or open_presentation"
+            }
+
+        refusal = _visual_qa_gate(presentations, presentation_id)
+        if refusal is not None:
+            return refusal
+
+        pres = presentations[presentation_id]
+
+        if not filename.lower().endswith(".pptx"):
+            filename += ".pptx"
+
+        try:
+            import io
+            buf = io.BytesIO()
+            pres.save(buf)
+            client = DialFileClient()
+            file_url = client.upload(buf.getvalue(), filename)
+            return {
+                "message": f"Presentation exported to DIAL file storage: {file_url}. "
+                           "Include this file URL in your final answer.",
+                "file_url": file_url,
+                "mime_type": PPTX_MIME,
+                "size_bytes": buf.getbuffer().nbytes
+            }
+        except DialConfigError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"Failed to export presentation to DIAL: {str(e)}"}
 
     @app.tool(
         annotations=ToolAnnotations(
