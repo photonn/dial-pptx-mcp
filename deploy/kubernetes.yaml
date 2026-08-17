@@ -37,15 +37,29 @@ spec:
                 secretKeyRef:
                   name: dial-pptx-mcp-secrets
                   key: dial-api-key
+          # Sizing depends on whether visual QA is enabled:
+          #  - deck generation only (no VISION_LLM_*): 100m CPU / 256Mi is fine.
+          #  - visual QA enabled: LibreOffice renders the deck to PDF in-pod
+          #    and needs far more — budget 1 CPU and 2Gi, or renders get
+          #    OOM-killed and every export fails the QA gate.
           resources:
             requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
+              cpu: 500m
               memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          # LibreOffice needs a writable temp dir for its profile and
+          # conversion scratch files.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           securityContext:
             runAsNonRoot: true
             allowPrivilegeEscalation: false
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

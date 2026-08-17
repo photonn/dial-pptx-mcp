@@ -100,6 +100,17 @@ When a vision LLM is configured (`VISION_LLM_*`), quality assurance is **entirel
 3. The deck is re-rendered and re-inspected; the loop repeats up to `VISUAL_QA_MAX_ITERATIONS` (default 10) inspections, stopping early if no repair makes progress.
 4. Only a deck that passes is exported. `VISUAL_QA_ON_UNRESOLVED` controls what happens if the loop cannot reach a pass: `report` (default) fails the export with the unresolved issue list — a genuine failure report, not a retry request — while `export_as_is` ships the best-effort deck anyway.
 
+### Sizing the QA loop (orchestrator budget, timeouts, pod resources)
+
+The internal loop runs entirely inside the single export tool call, so it consumes **no orchestrator iterations** — but it does consume wall-clock time and pod resources:
+
+| Concern | Guidance |
+|---|---|
+| Orchestrator iterations (Quick Apps `max_iterations`, default 15) | Sized by how many tool calls the deck needs, not by QA. Roughly 2 calls per slide plus create/export: a 20-slide deck needs **~45**, so set `max_iterations` to **60** (80 if slides carry charts/tables/images) |
+| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | One QA round on a 20-slide deck ≈ 40–90s (render + review + repair). Budget `VISUAL_QA_MAX_ITERATIONS × 90s`: **900s** for 10 rounds, or lower the rounds to 3–4 and use 600s. The cap is 3600s — if the timeout fires mid-export the agent just sees a tool error |
+| Slides actually reviewed | `VISION_LLM_MAX_SLIDES` defaults to **15** — raise it to cover longer decks (e.g. 20), or slides past the cap go unreviewed |
+| Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails the gate and blocks every export |
+
 Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
 
 ## Multi-tenancy and scaling notes
