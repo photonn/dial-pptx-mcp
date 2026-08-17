@@ -103,31 +103,45 @@ class DialFileClient:
     def _auth_headers(self):
         return resolve_dial_auth_headers(self._api_key)
 
-    def get_bucket(self):
+    def get_bucket_info(self):
+        """GET /v1/bucket for the resolved credentials. Returns the full
+        response: always {"bucket": ...}; in an application context DIAL
+        Core adds {"appdata": "{user-bucket}/appdata/{deployment}"} — a
+        path inside the END USER's bucket that the app may write and the
+        user may read."""
         headers = self._auth_headers()
         r = httpx.get(f"{self._base_url}/v1/bucket", headers=headers,
                       timeout=self._timeout)
         r.raise_for_status()
-        return r.json()["bucket"]
+        return r.json()
+
+    def get_bucket(self):
+        return self.get_bucket_info()["bucket"]
 
     def upload(self, data: bytes, filename: str, folder: str = None,
                content_type: str = PPTX_MIME):
-        """Upload bytes to the caller's bucket; returns the DIAL-relative
-        file URL, e.g. files/{bucket}/{folder}/{unique}/{filename}."""
+        """Upload bytes to user-accessible DIAL storage; returns the
+        DIAL-relative file URL.
+
+        Uses the appdata path when DIAL Core provides one (application
+        context: the file lands in the end user's bucket, so the user can
+        download the attachment — the dall-e-3 pattern); otherwise the
+        caller's own bucket (direct user context)."""
         headers = self._auth_headers()
-        bucket = self.get_bucket()
+        info = self.get_bucket_info()
+        base = info.get("appdata") or info["bucket"]
         folder = folder or os.environ.get("DIAL_UPLOAD_FOLDER", "pptx-mcp")
         # Unique path segment so concurrent exports never collide/overwrite.
-        path = f"{folder}/{uuid.uuid4().hex}/{filename}"
+        path = f"{base}/{folder}/{uuid.uuid4().hex}/{filename}"
         r = httpx.put(
-            f"{self._base_url}/v1/files/{bucket}/{path}",
+            f"{self._base_url}/v1/files/{path}",
             headers=headers,
             files={"file": (filename, io.BytesIO(data), content_type)},
             timeout=self._timeout,
         )
         r.raise_for_status()
         meta = r.json()
-        return meta.get("url", f"files/{bucket}/{path}")
+        return meta.get("url", f"files/{path}")
 
     def download(self, file_url: str) -> bytes:
         """Download a DIAL file by its relative URL (files/{bucket}/{path})

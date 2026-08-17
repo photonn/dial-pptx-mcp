@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 class _StubDial(BaseHTTPRequestHandler):
     last_upload = {}
+    appdata = None  # set to a path to simulate an application context
 
     def log_message(self, *args):
         pass
@@ -22,7 +23,11 @@ class _StubDial(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/v1/bucket" and self._authed():
-            self._json(b'{"bucket": "STUBBUCKET"}')
+            body = {"bucket": "STUBBUCKET"}
+            if _StubDial.appdata:
+                body["appdata"] = _StubDial.appdata
+            import json
+            self._json(json.dumps(body).encode())
         else:
             self.send_response(401 if not self._authed() else 404)
             self.end_headers()
@@ -73,6 +78,20 @@ class TestDialFileClient(unittest.TestCase):
         self.assertTrue(url.startswith("files/STUBBUCKET/pptx-mcp/"))
         self.assertTrue(url.endswith("/deck.pptx"))
         self.assertGreater(_StubDial.last_upload["size"], 10)  # multipart envelope
+
+    def test_upload_prefers_appdata_path(self):
+        """Application context: files must land in the END USER's bucket via
+        the appdata path so the user can download the attachment."""
+        from dial_client import DialFileClient
+        _StubDial.appdata = "USERBUCKET/appdata/dial-pptx-mcp"
+        try:
+            url = DialFileClient().upload(b"deck", "deck.pptx")
+        finally:
+            _StubDial.appdata = None
+        self.assertTrue(url.startswith(
+            "files/USERBUCKET/appdata/dial-pptx-mcp/pptx-mcp/"))
+        self.assertTrue(url.endswith("/deck.pptx"))
+        self.assertIn("/USERBUCKET/appdata/", _StubDial.last_upload["path"])
 
     def test_unique_upload_paths(self):
         from dial_client import DialFileClient
