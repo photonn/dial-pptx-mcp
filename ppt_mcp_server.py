@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 """
 MCP Server for PowerPoint manipulation using python-pptx.
-Consolidated version with 20 tools organized into multiple modules.
+Fork for EPAM AI DIAL: remote transport, multi-tenant state, DIAL file I/O
+and agent-driven visual QA on top of the upstream content tools.
 """
 import os
 import argparse
 import logging
+import re
+from pathlib import Path
 from typing import Dict, Any
 
 from dotenv import load_dotenv
@@ -21,6 +24,7 @@ LOG_LEVEL = configure_logging()
 logger = get_logger("server")
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 # import utils  # Currently unused
 from tools import (
@@ -316,45 +320,30 @@ register_image_tools(
 # tenant's presentation handles and the latter only mutated the (removed)
 # global "current presentation" pointer.
 
-@app.tool()
+@app.tool(
+    annotations=ToolAnnotations(
+        title="Get Server Info",
+        readOnlyHint=True,
+    ),
+)
 def get_server_info() -> Dict:
-    """Get information about the MCP server."""
+    """Report this server's version, how many tools it is actually exposing,
+    and whether the optional DIAL and visual QA integrations are configured.
+
+    Tool registration is dynamic — the visual QA tools appear only when a
+    vision LLM is configured — so "tools" is counted at call time rather
+    than hardcoded."""
     return {
-        "name": "PowerPoint MCP Server - Enhanced Edition",
-        "version": "2.1.0",
-        "total_tools": 32,  # Organized into 11 specialized modules
+        "name": "dial-pptx-mcp (PowerPoint MCP Server for EPAM AI DIAL)",
+        "version": _project_version(),
+        "upstream": "GongRzhe/Office-PowerPoint-MCP-Server",
+        "tools": _registered_tool_count(),
         "loaded_presentations": len(presentations),
-        "features": [
-            "Presentation Management (7 tools)",
-            "Content Management (6 tools)", 
-            "Template Operations (7 tools)",
-            "Structural Elements (4 tools)",
-            "Professional Design (3 tools)",
-            "Specialized Features (5 tools)"
-        ],
-        "improvements": [
-            "32 specialized tools organized into 11 focused modules",
-            "68+ utility functions across 7 organized utility modules",
-            "Enhanced parameter handling and validation",
-            "Unified operation interfaces with comprehensive coverage",
-            "Advanced template system with auto-generation capabilities",
-            "Professional design tools with multiple effects and styling",
-            "Specialized features including hyperlinks, connectors, slide masters",
-            "Dynamic text sizing and intelligent wrapping",
-            "Advanced visual effects and styling",
-            "Content-aware optimization and validation",
-            "Complete PowerPoint lifecycle management",
-            "Modular architecture for better maintainability"
-        ],
-        "new_enhanced_features": [
-            "Hyperlink Management - Add, update, remove, and list hyperlinks in text",
-            "Advanced Chart Data Updates - Replace chart data with new categories and series",
-            "Advanced Text Run Formatting - Apply formatting to specific text runs",
-            "Shape Connectors - Add connector lines and arrows between points",
-            "Slide Master Management - Access and manage slide masters and layouts",
-            "Slide Transitions - Basic transition management (placeholder for future)"
-        ]
+        "visual_qa": _visual_qa_status(),
+        "dial_file_storage": ("configured" if os.environ.get("DIAL_CORE_URL")
+                              else "unset"),
     }
+
 
 def _transport_security_for(host: str):
     """Host-header (DNS-rebinding) protection for the HTTP transports.
@@ -392,6 +381,20 @@ def _transport_security_for(host: str):
 
 
 # ---- Main Function ----
+
+def _project_version():
+    """Version from pyproject.toml next to this file — the one place it is
+    maintained. Parsed by hand: tomllib is 3.11+ and CI still runs 3.10."""
+    try:
+        text = (Path(__file__).resolve().parent / "pyproject.toml").read_text()
+        match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if match:
+            return match.group(1)
+    except OSError:
+        pass
+    logger.debug("project_version_unavailable")
+    return "unknown"
+
 
 def _registered_tool_count():
     """Number of tools the SDK ended up exposing (registration is dynamic —

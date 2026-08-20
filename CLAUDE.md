@@ -45,6 +45,10 @@ server and injected as arguments — that is why tool modules take long paramete
 (argument validation, dict responses); `utils/` holds the python-pptx work and is re-exported flat through `utils/__init__.py`
 (`import utils as ppt_utils`).
 
+`get_server_info` derives everything it reports: the version from `pyproject.toml` via `_project_version()` (parsed with a
+regex, not `tomllib`, because CI still runs 3.10) and the tool count from the live registry, since registration is dynamic.
+Don't reintroduce hardcoded versions or counts there — the upstream ones were both wrong by the time anyone noticed.
+
 **Two unrelated meanings of "template".** (1) A corporate `.pptx`/`.potx` file that *becomes* the presentation, preserving
 theme/masters/layouts byte-for-byte — `create_presentation_from_template{,_content}` in `tools/presentation_tools.py`, with
 `.potx` handled by content-type coercion in `utils/presentation_utils.py`. (2) `slide_layout_templates.json` — 23
