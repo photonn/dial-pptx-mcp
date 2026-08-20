@@ -97,6 +97,15 @@ does not re-dirty a deck they just certified. The reviewer reaches the model eit
 endpoint or as a DIAL Core deployment (`_resolve_provider`); Azure and DIAL's Azure upstream both reject calls without
 `?api-version=`, added by `_with_api_version`.
 
+**Images (`tools/image_tools.py`).** The server never generates images; the orchestrator does, stores the result in DIAL
+files, and passes the `files/{bucket}/{path}` URL to `add_image_from_dial_url`, which downloads the bytes through
+`DialFileClient` (same `DIAL_AUTH_MODE` resolution as export) so a multi-MB PNG never crosses the agent's context.
+Upstream's `manage_image(source_type="base64")` stays as the small-asset fallback. `_place` does the geometry: `contain`
+(default) scales into the given box and centres, `cover` fills and crops via `Picture.crop_*`, `stretch` distorts, one
+dimension scales proportionally, neither keeps native size clamped to the slide. Default to non-distorting fits — visual
+QA can move, resize and delete a picture but has no operation that un-distorts one. `DIAL_IMAGE_MAX_MB` bounds the
+download.
+
 **DIAL file I/O (`dial_client.py`).** `resolve_dial_auth_headers` implements `DIAL_AUTH_MODE`: `auto` prefers credentials
 pulled off the incoming MCP request (so exports land in the end user's own bucket — only works when the server is deployed
 under the DIAL host) and falls back to `DIAL_API_KEY`; `caller` fails instead of falling back; `server` always uses the

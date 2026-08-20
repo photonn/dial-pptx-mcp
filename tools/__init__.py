@@ -14,6 +14,7 @@ from .connector_tools import register_connector_tools
 from .master_tools import register_master_tools
 from .transition_tools import register_transition_tools
 from .visual_tools import register_visual_tools
+from .image_tools import register_image_tools
 
 __all__ = [
     "register_visual_tools",
@@ -26,5 +27,6 @@ __all__ = [
     "register_chart_tools",
     "register_connector_tools",
     "register_master_tools",
-    "register_transition_tools"
+    "register_transition_tools",
+    "register_image_tools"
 ]

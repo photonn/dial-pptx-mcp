@@ -13,6 +13,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | Transport | stdio (single local client) | streamable-http / SSE, container-ready (`PPT_MCP_*` env vars) |
 | State | process globals, guessable sequential IDs | per-deck UUID handles (unguessable), thread-safe store with TTL + LRU bounds, per-deck locking |
 | File I/O | local disk paths | DIAL Files API: template in via Quick Apps `file:data::` references, deck out via `export_presentation` returning a DIAL file URL |
+| Images | local path or base64 | `add_image_from_dial_url` fetches orchestrator-generated images from DIAL storage server-side, with aspect-ratio-aware placement |
 | Deployment | — | Dockerfile (non-root, HTTP defaults) + generic Kubernetes example |
 
 The ~30 upstream content/formatting tools (slides, text, charts, tables, connectors, hyperlinks, masters, transitions) are unchanged — see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) for the full tool reference.
@@ -31,6 +32,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `DIAL_AUTH_MODE` | no | `auto` | `auto`: credentials from the incoming MCP request first (the end user's bearer, attached by Quick Apps for servers deployed under the DIAL host — exports land in that user's own bucket), falling back to `DIAL_API_KEY`. `caller`: incoming credentials only — fail loudly instead of falling back. `server`: always `DIAL_API_KEY` (single shared bucket) |
 | `DIAL_API_KEY` | no | — | Server's own DIAL API key — the fallback identity in `auto` mode, the only identity in `server` mode |
 | `DIAL_UPLOAD_FOLDER` | no | `pptx-mcp` | Folder inside the bucket for exported decks |
+| `DIAL_IMAGE_MAX_MB` | no | `20` | Largest image `add_image_from_dial_url` will download and embed. An unparsable value falls back to the default |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
@@ -96,6 +98,39 @@ Register the deployed server as an MCP tool set in your Quick App manifest:
 - **Deploy the server under the DIAL host** (behind DIAL Core routing) for per-user storage. Quick Apps attaches the end user's `Authorization: Bearer` only to MCP servers whose URL starts with the DIAL host — with it, the default `auto` mode uploads every export to that user's own bucket. For a server at an external URL, Quick Apps sends no user credentials (it deliberately refuses to forward `api-key`/`authorization` as custom headers), so `auto` falls back to the server's `DIAL_API_KEY` and exports land in the server's single bucket; set `DIAL_AUTH_MODE=caller` if you'd rather exports fail loudly than fall back.
 - **Template input**: the orchestrating agent passes the template to `create_presentation_from_template_content` as `file:data::files/{bucket}/{path}` — Quick Apps' file preprocessing resolves that reference to a data: URI before this server receives it (base64 via `file:base64::` also accepted). Note Quick Apps' default 10 MiB file-loading limit (`features.file_loading.size_limit`) if your templates are large.
 - **Deck output**: `export_presentation` uploads to DIAL file storage and returns the `files/{bucket}/{path}` URL; the tool description instructs the agent to include it in its final answer.
+
+## Images (orchestrator-generated)
+
+The server does not generate images — it embeds them. The split is: **the orchestrator generates, the MCP inserts**, and only a short URL travels between the two.
+
+| Tool | Use it for |
+|---|---|
+| `add_image_from_dial_url(presentation_id, slide_index, image_url, left?, top?, width?, height?, fit?)` | Anything the orchestrator produced with an image model. It calls the image deployment (a DIAL Core deployment sits next to the vision one), saves the result to DIAL file storage, and passes the `files/{bucket}/{path}` URL here; the server downloads the bytes itself with the caller's own DIAL credentials (same `DIAL_AUTH_MODE` resolution as export) |
+| `manage_image(..., source_type="base64")` | Small assets only, and deployments not running under the DIAL host |
+
+Prefer the URL tool. A 1024×1024 PNG is ~1–2 MB, so passing it as base64 pushes ~2 MB of payload through the agent's context on every insertion — enough to wreck the iteration budget on a multi-image deck.
+
+**Placement is aspect-ratio aware.** `slide_index` is 0-based (like the other content tools; visual QA slide numbers are 1-based). Give `width` **and** `height` to define the box the picture should occupy, and `fit` decides how it relates to that box:
+
+- `contain` (default) — largest undistorted size that fits, centred in the box. Safe for photos and illustrations.
+- `cover` — fills the box exactly, cropping the overflowing edges symmetrically (python-pptx crop, no re-encoding).
+- `stretch` — forces the exact box, distorting the image. Visual QA can move, resize and delete a picture, but it cannot un-distort one, so avoid `stretch` unless you mean it.
+
+Pass only one of `width`/`height` to scale proportionally, or neither to keep the image's natural size — clamped to the slide, so a large generated PNG never hangs off the edge. The response reports the geometry actually applied (`"placed"`), which under `contain` may be smaller than the box you asked for; use it to lay out the text beside the image. A half-and-half slide on a 13.33in deck is text at `left=0.8, width=5.6` and the picture at `left=6.9, top=1.2, width=5.6, height=4.5`.
+
+**Telling the agent to use it.** Image generation is the orchestrator's job, so it belongs in the Quick App's system prompt:
+
+```text
+When a slide would be stronger with a visual — a supporting image beside the
+text, a cover image, an icon — generate it with the image model, upload it to
+DIAL file storage, and pass the returned files/... URL to
+add_image_from_dial_url. Never paste image data into the conversation. Give
+width and height for the box you want it to fill and leave fit at "contain"
+so the image is not distorted; for a text-left/image-right slide use roughly
+half the slide width for each.
+```
+
+Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
 
 ## Visual QA (agent-driven inspect and repair)
 
