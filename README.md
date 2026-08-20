@@ -39,7 +39,12 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
 | `VISION_LLM_PROVIDER` | no | auto | Force the backend: `direct` or `dial` (default: `direct` when `VISION_LLM_ENDPOINT` is set, else `dial`) |
 | `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
-| `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per inspection |
+| `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per whole-deck inspection (an explicit `slides` list is never capped) |
+| `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely |
+| `VISUAL_QA_MAX_ITERATIONS` | no | `10` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
+| `VISUAL_QA_EXPORT_GATE` | no | `false` | `true` also runs a whole-deck inspect-repair loop inside export/save and refuses unverified decks |
+| `VISUAL_QA_ON_UNRESOLVED` | no | `report` | Export gate only: `report` fails the export with the issue list, `export_as_is` ships the deck |
+| `VISUAL_QA_ON_ERROR` | no | `block` | Export gate only: `allow` exports when inspection itself cannot run |
 | `SOFFICE_PATH` | no | `soffice` on PATH | LibreOffice binary used to render slides (the Docker image includes LibreOffice) |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. One log line per event on stderr — see [Logging](#logging). An unrecognized value falls back to `INFO` rather than failing startup |
 
@@ -92,27 +97,51 @@ Register the deployed server as an MCP tool set in your Quick App manifest:
 - **Template input**: the orchestrating agent passes the template to `create_presentation_from_template_content` as `file:data::files/{bucket}/{path}` — Quick Apps' file preprocessing resolves that reference to a data: URI before this server receives it (base64 via `file:base64::` also accepted). Note Quick Apps' default 10 MiB file-loading limit (`features.file_loading.size_limit`) if your templates are large.
 - **Deck output**: `export_presentation` uploads to DIAL file storage and returns the `files/{bucket}/{path}` URL; the tool description instructs the agent to include it in its final answer.
 
-## Automatic visual QA (internal inspect-and-repair loop)
+## Visual QA (agent-driven inspect and repair)
 
-When a vision LLM is configured (`VISION_LLM_*`), quality assurance is **entirely internal to the server** — the calling agent only ever receives a finished, verified presentation. On every `export_presentation`/`save_presentation` of a deck that was created or edited since it last passed:
+When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools the orchestrating agent calls whenever it wants — typically right after building each slide, not only at the end:
 
-1. All slides are rendered (LibreOffice → PDF → PNG) and reviewed by the vision LLM for template/brand fidelity and visible errors (overflowing or clipped text, overlaps, unfilled placeholders, broken charts, illegibility).
-2. If issues are found, the server **repairs the deck itself**: the LLM is shown the issues, the affected slides' structure, and their images, and returns a plan of whitelisted operations (move/resize shape, set font size, set text, word wrap, delete shape) that are validated and applied with python-pptx.
-3. The deck is re-rendered and re-inspected; the loop repeats up to `VISUAL_QA_MAX_ITERATIONS` (default 10) inspections, stopping early if no repair makes progress.
-4. Only a deck that passes is exported. `VISUAL_QA_ON_UNRESOLVED` controls what happens if the loop cannot reach a pass: `report` (default) fails the export with the unresolved issue list — a genuine failure report, not a retry request — while `export_as_is` ships the best-effort deck anyway.
+| Tool | What it does |
+|---|---|
+| `visual_inspect_slides(presentation_id, slides?, focus?, reference_presentation_id?)` | Renders the selected slides (LibreOffice → PDF → PNG) and has the vision LLM review them for template/brand fidelity and visible errors (overflowing or clipped text, overlaps, elements off the slide, unfilled placeholders, broken charts, illegibility). Read-only: returns `{"passed", "issues": [{slide, severity, description, suggested_fix}]}` |
+| `visual_repair_slides(presentation_id, slides?, focus?, max_iterations?)` | Inspects, then **repairs the deck itself** and re-inspects, looping until the slides pass or the budget runs out. The LLM is shown the issues, the affected slides' structure and their images, and returns a plan of whitelisted operations (move/resize shape, set font size, set text, word wrap, delete shape) that are validated and applied with python-pptx |
 
-### Sizing the QA loop (orchestrator budget, timeouts, pod resources)
+`slides` is a list of 1-based slide numbers; omit it to work on the whole deck. Issue slide numbers are always absolute deck positions, even when only a subset was rendered, and a scoped repair call never touches a slide outside `slides`. Because LibreOffice converts the whole deck either way, a narrow selection saves the vision call and the repair round, not the render.
 
-The internal loop runs entirely inside the single export tool call, so it consumes **no orchestrator iterations** — but it does consume wall-clock time and pod resources:
+`max_iterations` defaults to `VISUAL_QA_MAX_ITERATIONS` (10) and can be lowered per call for a quick single-slide pass. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
+
+### Export
+
+`export_presentation` does **not** run QA. It reports what it knows — `"visual_qa": "passed" | "unverified" | "unavailable"` — and adds a note when the deck was never inspected or was edited since its last passing inspection. Only a clean whole-deck inspection marks a deck `passed`; a scoped call clears nothing.
+
+Operators who want the old guarantee that no unverified deck ever leaves the server set `VISUAL_QA_EXPORT_GATE=true`: export/save then run the whole-deck inspect-repair loop for dirty decks and refuse the export if it cannot reach a pass. With the gate on, `VISUAL_QA_ON_UNRESOLVED` chooses `report` (default — fail the export with the unresolved issue list) or `export_as_is`, and `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks). Both variables are inert while the gate is off.
+
+### Telling the agent to use it
+
+Nothing forces the orchestrator to inspect: with the export gate off, `export_presentation` reports `"visual_qa": "unverified"` but still succeeds. Put the workflow in the Quick App's system prompt so QA actually happens:
+
+```text
+After you finish building each slide, call visual_inspect_slides with that
+slide's number. If it reports issues, call visual_repair_slides for the same
+slide and continue only once it passes or you have fixed the content yourself.
+Before export_presentation, call visual_inspect_slides once with no slides
+argument to check the deck as a whole. If the export response says
+"visual_qa": "unverified", say so in your answer rather than presenting the
+deck as checked.
+```
+
+Per-slide checks are the cheap path — one render plus one vision call each, caught while the slide is still fresh in context. Keep the whole-deck pass for the end: it is the only thing that marks the deck `passed`, and it catches cross-slide inconsistencies a single-slide review cannot see.
+
+### Sizing the QA work (orchestrator budget, timeouts, pod resources)
 
 | Concern | Guidance |
 |---|---|
-| Orchestrator iterations (Quick Apps `max_iterations`, default 15) | Sized by how many tool calls the deck needs, not by QA. Roughly 2 calls per slide plus create/export: a 20-slide deck needs **~45**, so set `max_iterations` to **60** (80 if slides carry charts/tables/images) |
-| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | One QA round on a 20-slide deck ≈ 40–90s (render + review + repair). Budget `VISUAL_QA_MAX_ITERATIONS × 90s`: **900s** for 10 rounds, or lower the rounds to 3–4 and use 600s. The cap is 3600s — if the timeout fires mid-export the agent just sees a tool error |
-| Slides actually reviewed | `VISION_LLM_MAX_SLIDES` defaults to **15** — raise it to cover longer decks (e.g. 20), or slides past the cap go unreviewed |
-| Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails the gate and blocks every export |
+| Orchestrator iterations (Quick Apps `max_iterations`, default 15) | Now includes the QA calls the agent makes. Roughly 2 calls per slide plus create/export, plus one inspect or repair per slide: a 20-slide deck needs **~65**, so set `max_iterations` to **80** (100 if slides carry charts/tables/images) |
+| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | A single-slide inspect ≈ 15–30s (render + review); a single-slide repair round adds another LLM call. A whole-deck `visual_repair_slides` on 20 slides is the expensive case at ≈ 40–90s per round — budget `max_iterations × 90s` for it, or keep calls slide-scoped and 300s is plenty |
+| Slides actually reviewed | `VISION_LLM_MAX_SLIDES` (default 15) caps whole-deck calls only; an explicit `slides` list is never truncated |
+| Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails every QA call |
 
-Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
+`VISUAL_QA_ENFORCE=false` registers neither tool and turns the feature off. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each inspect is one render plus one LLM call; each repair round adds a second LLM call.
 
 ## Logging
 

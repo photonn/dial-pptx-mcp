@@ -101,9 +101,14 @@ slide bounds. Prefer minimal changes: resize/move/shrink text before deleting \
 anything. Do not touch shapes that have no reported issue."""
 
 
-def plan_repairs(llm, issues, pres, deck_images):
+def plan_repairs(llm, issues, pres, deck_images, image_slides=None):
     """Ask the vision LLM for a repair plan. Returns a list of operation
-    dicts (possibly empty)."""
+    dicts (possibly empty).
+
+    image_slides: absolute 1-based slide number of each image in
+    deck_images. Defaults to 1..N (a full-deck render); pass it whenever
+    only a subset of slides was rendered, so the right images are attached.
+    """
     slide_numbers = sorted({
         i.get("slide") for i in issues if isinstance(i.get("slide"), int)
     }) or None
@@ -114,10 +119,12 @@ def plan_repairs(llm, issues, pres, deck_images):
         width_in=_emu_to_in(pres.slide_width),
         height_in=_emu_to_in(pres.slide_height),
     )
+    if image_slides is None:
+        image_slides = list(range(1, len(deck_images) + 1))
     images = deck_images
     if slide_numbers:
-        images = [deck_images[n - 1] for n in slide_numbers
-                  if 0 < n <= len(deck_images)]
+        by_slide = dict(zip(image_slides, deck_images))
+        images = [by_slide[n] for n in slide_numbers if n in by_slide]
     logger.debug("repair_plan_request issues=%d slides=%s images=%d",
                  len(issues), slide_numbers or "all", len(images))
     data = llm.ask_json(images, prompt)
@@ -135,9 +142,13 @@ def _in_range(v, lo_hi):
     return isinstance(v, (int, float)) and lo_hi[0] <= v <= lo_hi[1]
 
 
-def apply_repairs(pres, operations):
+def apply_repairs(pres, operations, allowed_slides=None):
     """Validate and apply whitelisted operations. Returns
-    {"applied": [...], "skipped": [{"op":..., "reason":...}]}."""
+    {"applied": [...], "skipped": [{"op":..., "reason":...}]}.
+
+    allowed_slides: when set, operations targeting any other slide are
+    skipped — a slide-scoped repair call must not touch slides the caller
+    did not put in scope."""
     applied, skipped = [], []
     slides = list(pres.slides)
 
@@ -149,6 +160,9 @@ def apply_repairs(pres, operations):
         slide_no, shape_idx = op.get("slide"), op.get("shape_index")
         if not (isinstance(slide_no, int) and 1 <= slide_no <= len(slides)):
             skipped.append({"op": op, "reason": "bad slide number"})
+            continue
+        if allowed_slides and slide_no not in allowed_slides:
+            skipped.append({"op": op, "reason": "slide out of scope"})
             continue
         shapes = list(slides[slide_no - 1].shapes)
         if not (isinstance(shape_idx, int) and 0 <= shape_idx < len(shapes)):

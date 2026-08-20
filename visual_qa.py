@@ -54,8 +54,15 @@ def _soffice_binary():
 
 
 def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
-                              max_slides: int = None) -> list:
-    """Render presentation bytes to a list of PNG bytes, one per slide."""
+                              max_slides: int = None,
+                              slides: list = None) -> list:
+    """Render presentation bytes to a list of PNG bytes.
+
+    slides: 1-based slide numbers to rasterize (default: every slide).
+    LibreOffice always converts the whole deck — there is no per-slide
+    conversion — so a subset only skips rasterization and, more importantly,
+    the vision call. max_slides still caps how many images come back.
+    """
     import pymupdf
 
     with tempfile.TemporaryDirectory(prefix="pptx-visual-qa-") as tmp:
@@ -84,17 +91,53 @@ def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
         images = []
         with pymupdf.open(pdf) as doc:
             page_count = doc.page_count
-            pages = page_count if max_slides is None else min(page_count, max_slides)
-            for i in range(pages):
-                pix = doc[i].get_pixmap(dpi=dpi)
+            if slides is None:
+                wanted = list(range(1, page_count + 1))
+            else:
+                wanted = [n for n in slides if 1 <= n <= page_count]
+            if max_slides is not None:
+                wanted = wanted[:max_slides]
+            for number in wanted:
+                pix = doc[number - 1].get_pixmap(dpi=dpi)
                 images.append(pix.tobytes("png"))
-        if page_count > len(images):
+        if slides is None and page_count > len(images):
             logger.warning("render_truncated rendered=%d slides=%d cap=%s "
                            "hint=raise_VISION_LLM_MAX_SLIDES",
                            len(images), page_count, max_slides)
-        logger.debug("render_ok slides=%d dpi=%d duration_ms=%d",
-                     len(images), dpi, int((time.monotonic() - started) * 1000))
+        logger.debug("render_ok slides=%d of=%d dpi=%d duration_ms=%d",
+                     len(images), page_count, dpi,
+                     int((time.monotonic() - started) * 1000))
         return images
+
+
+def normalize_slides(pres, slides):
+    """Validate a caller-supplied 1-based slide selection against the deck.
+
+    Returns a sorted, de-duplicated list, or None for "the whole deck".
+    Raises ValueError naming the out-of-range numbers, so the tool layer can
+    hand the agent an actionable message.
+    """
+    if slides is None:
+        return None
+    if isinstance(slides, int):
+        slides = [slides]
+    total = len(pres.slides)
+    numbers, bad = [], []
+    for value in slides:
+        if isinstance(value, bool) or not isinstance(value, int):
+            bad.append(value)
+        elif 1 <= value <= total:
+            numbers.append(value)
+        else:
+            bad.append(value)
+    if bad:
+        raise ValueError(
+            f"Invalid slide number(s) {bad}: this presentation has {total} "
+            f"slide(s), numbered 1-{total}."
+        )
+    if not numbers:
+        return None
+    return sorted(set(numbers))
 
 
 # ---- Vision LLM client (OpenAI Responses API shape, Azure-compatible) ----
@@ -316,9 +359,12 @@ class VisionLLM:
 
 
 def enforcement_enabled() -> bool:
-    """Automatic visual QA is on when the vision LLM is configured — either
+    """Visual QA is available when the vision LLM is configured — either
     directly (VISION_LLM_ENDPOINT + VISION_LLM_API_KEY) or as a DIAL Core
-    deployment (DIAL_CORE_URL) — unless disabled with VISUAL_QA_ENFORCE=false."""
+    deployment (DIAL_CORE_URL) — unless disabled with VISUAL_QA_ENFORCE=false.
+
+    Gates registration of the inspect/repair tools; also required for the
+    optional export gate (see export_gate_enabled)."""
     if not os.environ.get("VISION_LLM_MODEL"):
         return False
     if _resolve_provider() == "direct":
@@ -328,6 +374,19 @@ def enforcement_enabled() -> bool:
         configured = bool(os.environ.get("DIAL_CORE_URL"))
     return configured and os.environ.get(
         "VISUAL_QA_ENFORCE", "true").lower() != "false"
+
+
+def export_gate_enabled() -> bool:
+    """Whether export/save should run the inspect-repair loop themselves.
+
+    Off by default: QA is driven by the orchestrator through the
+    visual_inspect_slides / visual_repair_slides tools, which it can call as
+    often as it likes on whichever slides it just built. Operators who want
+    the old always-on gate — a deck can never leave the server uninspected —
+    set VISUAL_QA_EXPORT_GATE=true.
+    """
+    return (enforcement_enabled()
+            and os.environ.get("VISUAL_QA_EXPORT_GATE", "false").lower() == "true")
 
 
 def unresolved_policy() -> str:
@@ -345,24 +404,36 @@ def fail_open_on_error() -> bool:
     return os.environ.get("VISUAL_QA_ON_ERROR", "block").lower() == "allow"
 
 
-def inspect_presentation(pres, reference_pres=None, focus: str = None) -> dict:
-    """Render a python-pptx Presentation (and optional reference) and return
-    the vision reviewer's verdict. Raises VisualQAError on infrastructure
-    failure (renderer/LLM)."""
+def _render_deck(pres, max_slides=None, slides=None):
     import io
+    buf = io.BytesIO()
+    pres.save(buf)
+    return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides,
+                                     slides=slides)
 
+
+def _slide_cap():
+    return int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+
+
+def inspect_presentation(pres, reference_pres=None, focus: str = None,
+                         slides: list = None) -> dict:
+    """Render a python-pptx Presentation (and optional reference) and return
+    the vision reviewer's verdict.
+
+    slides: 1-based slide numbers to review; None reviews the whole deck
+    (capped by VISION_LLM_MAX_SLIDES). Issue slide numbers in the verdict are
+    always absolute deck positions, not positions within the selection.
+    Raises VisualQAError on infrastructure failure (renderer/LLM).
+    """
     llm = VisionLLM()
-    max_slides = int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+    max_slides = None if slides else _slide_cap()
 
-    def render(p):
-        buf = io.BytesIO()
-        p.save(buf)
-        return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides)
+    deck_images = _render_deck(pres, max_slides, slides)
+    ref_images = _render_deck(reference_pres, _slide_cap()) \
+        if reference_pres is not None else []
 
-    deck_images = render(pres)
-    ref_images = render(reference_pres) if reference_pres is not None else []
-
-    prompt = review_prompt(bool(ref_images), focus)
+    prompt = review_prompt(bool(ref_images), focus, slides)
     if ref_images:
         prompt += (
             f"\nImage order: images 1-{len(ref_images)} are the reference "
@@ -371,24 +442,25 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None) -> dict:
             "Report issue slide numbers relative to the deck under review."
         )
     verdict = llm.review(ref_images + deck_images, prompt)
-    verdict["slides_reviewed"] = len(deck_images)
-    logger.info("inspection_done slides=%d reference=%s passed=%s issues=%d",
-                len(deck_images), bool(ref_images), verdict.get("passed"),
+    verdict["slides_reviewed"] = slides or len(deck_images)
+    logger.info("inspection_done slides=%d scope=%s reference=%s passed=%s "
+                "issues=%d", len(deck_images),
+                ",".join(map(str, slides)) if slides else "deck",
+                bool(ref_images), verdict.get("passed"),
                 len(verdict.get("issues", [])))
     return verdict
 
 
-def _render_deck(pres, max_slides):
-    import io
-    buf = io.BytesIO()
-    pres.save(buf)
-    return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides)
+def inspect_and_repair(pres, slides: list = None, focus: str = None,
+                       max_iterations: int = None) -> dict:
+    """Inspect/repair loop: inspect the selected slides; on failure, repair
+    them in place via LLM-planned whitelisted operations (visual_fix.py) and
+    inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 10) inspections.
 
-
-def inspect_and_repair(pres) -> dict:
-    """Internal QA loop: inspect the deck; on failure, repair it in place via
-    the LLM-planned whitelisted operations (visual_fix.py) and inspect again,
-    up to VISUAL_QA_MAX_ITERATIONS (default 3) inspections.
+    slides: 1-based slide numbers to work on; None means the whole deck.
+    Repairs are confined to the reviewed slides — issues reported against
+    other slides are ignored, so a caller iterating slide by slide never has
+    the model rewrite a slide it did not ask about.
 
     Returns {"passed": bool, "iterations": n, "repair_rounds": [...],
     "issues": [...]} — "issues" holds what remains when passed is False.
@@ -397,20 +469,27 @@ def inspect_and_repair(pres) -> dict:
     import visual_fix
 
     llm = VisionLLM()
-    max_slides = int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
-    max_iterations = max(1, int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10")))
+    max_slides = None if slides else _slide_cap()
+    if max_iterations is None:
+        max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10"))
+    max_iterations = max(1, max_iterations)
 
     repair_rounds = []
     verdict = {}
     loop_started = time.monotonic()
-    logger.info("qa_loop_start slides_cap=%d max_iterations=%d",
+    logger.info("qa_loop_start scope=%s slides_cap=%s max_iterations=%d",
+                ",".join(map(str, slides)) if slides else "deck",
                 max_slides, max_iterations)
     for iteration in range(1, max_iterations + 1):
         round_started = time.monotonic()
-        deck_images = _render_deck(pres, max_slides)
-        verdict = llm.review(deck_images, review_prompt(False))
-        verdict["slides_reviewed"] = len(deck_images)
-        issues = verdict.get("issues", [])
+        deck_images = _render_deck(pres, max_slides, slides)
+        # Absolute slide number of each image, so issues and repairs address
+        # deck positions even when only a subset was rendered.
+        image_slides = slides or list(range(1, len(deck_images) + 1))
+        verdict = llm.review(deck_images, review_prompt(False, focus, slides))
+        verdict["slides_reviewed"] = slides or len(deck_images)
+        issues = [i for i in verdict.get("issues", [])
+                  if not slides or i.get("slide") in slides]
         logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
                     "duration_ms=%d", iteration, max_iterations,
                     len(deck_images), verdict.get("passed"), len(issues),
@@ -421,7 +500,9 @@ def inspect_and_repair(pres) -> dict:
                              "description=%s", iteration, issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if verdict.get("passed") is True:
+        if verdict.get("passed") is True or (slides and not issues
+                                             and verdict.get("passed") is not None):
+            # Passing verdict, or no issue left on the slides in scope.
             logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
                         "duration_ms=%d", iteration, len(repair_rounds),
                         int((time.monotonic() - loop_started) * 1000))
@@ -433,8 +514,9 @@ def inspect_and_repair(pres) -> dict:
                            "budget_exhausted" if iteration == max_iterations
                            else "no_actionable_issues", iteration)
             break
-        plan = visual_fix.plan_repairs(llm, issues, pres, deck_images)
-        result = visual_fix.apply_repairs(pres, plan)
+        plan = visual_fix.plan_repairs(llm, issues, pres, deck_images,
+                                       image_slides)
+        result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
         repair_rounds.append({
             "iteration": iteration,
             "issues_found": len(issues),
@@ -447,28 +529,38 @@ def inspect_and_repair(pres) -> dict:
                            iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
 
+    remaining = [i for i in verdict.get("issues", [])
+                 if not slides or i.get("slide") in slides]
     out = {"passed": False,
            "iterations": len(repair_rounds) + 1,
            "repair_rounds": repair_rounds,
-           "issues": verdict.get("issues", [])}
+           "issues": remaining}
     logger.warning("qa_loop_failed iterations=%d repair_rounds=%d "
-                   "unresolved_issues=%d duration_ms=%d policy=%s",
-                   out["iterations"], len(repair_rounds), len(out["issues"]),
-                   int((time.monotonic() - loop_started) * 1000),
-                   unresolved_policy())
+                   "unresolved_issues=%d duration_ms=%d",
+                   out["iterations"], len(repair_rounds), len(remaining),
+                   int((time.monotonic() - loop_started) * 1000))
     for key in ("raw_review", "note"):
         if key in verdict:
             out[key] = verdict[key]
     return out
 
 
-def review_prompt(has_reference: bool, focus: str = None) -> str:
+def review_prompt(has_reference: bool, focus: str = None,
+                  slides: list = None) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
         ref_clause=(" and matching the reference template images"
                     if has_reference else ""),
     )
+    if slides:
+        mapping = ", ".join(f"image {i} = slide {n}"
+                            for i, n in enumerate(slides, start=1))
+        prompt += (
+            f"\nYou are shown only part of a larger deck: {mapping}. Report "
+            "every issue with the slide number given here, not the image "
+            "position, and judge each slide on its own merits."
+        )
     if focus:
         prompt += f"\nAdditional focus requested by the caller: {focus}"
     return prompt

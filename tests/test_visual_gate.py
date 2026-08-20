@@ -1,4 +1,4 @@
-"""Tests for the automatic visual-QA export gate."""
+"""Tests for the optional visual-QA export gate (VISUAL_QA_EXPORT_GATE)."""
 import os
 import sys
 import unittest
@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from state import PresentationStore
-from tools.presentation_tools import _visual_qa_gate
+from tools.presentation_tools import _visual_qa_gate, _visual_qa_status
 import visual_qa
 
 VISION_ENV = {
@@ -16,7 +16,8 @@ VISION_ENV = {
     "VISION_LLM_API_KEY": "k",
     "VISION_LLM_MODEL": "m",
 }
-GATE_VARS = list(VISION_ENV) + ["VISUAL_QA_ENFORCE", "VISUAL_QA_ON_ERROR"]
+GATE_VARS = list(VISION_ENV) + ["VISUAL_QA_ENFORCE", "VISUAL_QA_ON_ERROR",
+                                "VISUAL_QA_EXPORT_GATE"]
 
 
 class GateTestCase(unittest.TestCase):
@@ -25,6 +26,8 @@ class GateTestCase(unittest.TestCase):
         for k in GATE_VARS:
             os.environ.pop(k, None)
         os.environ.update(VISION_ENV)
+        # The gate is opt-in now; these tests exercise it turned on.
+        os.environ["VISUAL_QA_EXPORT_GATE"] = "true"
         self.store = PresentationStore(ttl_seconds=60, max_items=10)
         self.pid = self.store.new_id()
         self.store[self.pid] = object()  # decks start dirty
@@ -49,6 +52,19 @@ class TestEnforcementSwitch(GateTestCase):
 
     def test_enabled_when_configured(self):
         self.assertTrue(visual_qa.enforcement_enabled())
+        self.assertTrue(visual_qa.export_gate_enabled())
+
+    def test_export_gate_is_off_by_default(self):
+        os.environ.pop("VISUAL_QA_EXPORT_GATE")
+        self.assertTrue(visual_qa.enforcement_enabled())  # tools still on
+        self.assertFalse(visual_qa.export_gate_enabled())
+        with patch.object(visual_qa, "inspect_and_repair") as mock:
+            self.assertIsNone(_visual_qa_gate(self.store, self.pid))
+        mock.assert_not_called()
+
+    def test_gate_off_when_qa_unconfigured_even_if_requested(self):
+        os.environ.pop("VISION_LLM_MODEL")
+        self.assertFalse(visual_qa.export_gate_enabled())
 
 
 class TestGateVerdicts(GateTestCase):
@@ -101,6 +117,21 @@ class TestGateVerdicts(GateTestCase):
             self.store.mark_dirty(self.pid)  # what the tool wrapper does
             _visual_qa_gate(self.store, self.pid)
         self.assertEqual(mock.call_count, 2)
+
+
+class TestExportStatus(GateTestCase):
+    """With the gate off, export reports the deck's QA state instead."""
+
+    def test_dirty_deck_is_unverified(self):
+        self.assertEqual(_visual_qa_status(self.store, self.pid), "unverified")
+
+    def test_inspected_deck_is_passed(self):
+        self.store.clear_dirty(self.pid)
+        self.assertEqual(_visual_qa_status(self.store, self.pid), "passed")
+
+    def test_unconfigured_qa_is_unavailable(self):
+        os.environ.pop("VISION_LLM_MODEL")
+        self.assertEqual(_visual_qa_status(self.store, self.pid), "unavailable")
 
 
 class TestGateInfraErrors(GateTestCase):

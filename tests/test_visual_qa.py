@@ -202,6 +202,22 @@ class TestRendering(unittest.TestCase):
         for png in images:
             self.assertTrue(png.startswith(b"\x89PNG"))
 
+    def test_render_selected_slides_only(self):
+        import shutil
+        if not (os.environ.get("SOFFICE_PATH") or shutil.which("soffice")):
+            self.skipTest("LibreOffice not installed")
+        from visual_qa import render_pptx_bytes_to_pngs
+        data = (Path(__file__).resolve().parent.parent /
+                "mcp_all_tools_templates_effects_demo.pptx").read_bytes()
+        both = render_pptx_bytes_to_pngs(data, max_slides=2)
+        only_second = render_pptx_bytes_to_pngs(data, slides=[2])
+        self.assertEqual(len(only_second), 1)
+        self.assertTrue(only_second[0].startswith(b"\x89PNG"))
+        # It is slide 2 that came back, not the first page again.
+        self.assertNotEqual(only_second[0], both[0])
+        # Out-of-range selections are dropped, not fatal.
+        self.assertEqual(render_pptx_bytes_to_pngs(data, slides=[9999]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

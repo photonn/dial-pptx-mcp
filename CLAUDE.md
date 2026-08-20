@@ -64,13 +64,25 @@ non-read-only, non-export call. It reaches into `app._tool_manager._tools`, whic
 degrades to a warning if those internals change. **Consequence: a new tool must declare `readOnlyHint=True` in its
 `ToolAnnotations` if it doesn't modify the deck**, or every call to it triggers a fresh visual-QA pass.
 
-**Visual QA (`visual_qa.py`, `visual_fix.py`).** Entirely internal to the server — the calling agent never sees a
-fix-and-retry request. `_visual_qa_gate` in `tools/presentation_tools.py` runs inside `export_presentation`/`save_presentation`
-for dirty decks: render via LibreOffice → PDF → PNG, vision-LLM review, then `visual_fix.plan_repairs` asks the model for a
-plan of **whitelisted, validated** operations (move/resize/font-size/set-text/word-wrap/delete) applied with python-pptx,
-re-render, repeat up to `VISUAL_QA_MAX_ITERATIONS`. Keep repairs whitelist-driven — never execute model-supplied code or
-widen the operation set without validation. The reviewer reaches the model either at a direct OpenAI Responses-API endpoint
-or as a DIAL Core deployment (`_resolve_provider`); Azure and DIAL's Azure upstream both reject calls without
+**Visual QA (`visual_qa.py`, `visual_fix.py`, `tools/visual_tools.py`).** Agent-driven, not an export gate: when a vision
+LLM is configured, `register_visual_tools` exposes `visual_inspect_slides` (read-only review) and `visual_repair_slides`
+(review → repair → re-review loop), both taking an optional 1-based `slides` list so the orchestrator can check the one
+slide it just built, as often as it likes. Pipeline: render via LibreOffice → PDF → PNG, vision-LLM review, then
+`visual_fix.plan_repairs` asks the model for a plan of **whitelisted, validated** operations
+(move/resize/font-size/set-text/word-wrap/delete) applied with python-pptx, re-render, repeat up to
+`VISUAL_QA_MAX_ITERATIONS`. Keep repairs whitelist-driven — never execute model-supplied code or widen the operation set
+without validation.
+
+Slide scoping runs through the whole stack and must stay consistent: LibreOffice always converts the entire deck, so a
+subset only selects pages to rasterize; `image_slides` maps images back to absolute slide numbers for `plan_repairs`; and
+`apply_repairs(..., allowed_slides=)` drops operations aimed at slides outside the scope. Issue slide numbers reported to
+the agent are always absolute, which is what the `review_prompt(..., slides=)` mapping note buys.
+
+`_visual_qa_gate` in `tools/presentation_tools.py` is the **optional** legacy behaviour (`VISUAL_QA_EXPORT_GATE=true`,
+off by default); with it off, export just reports `visual_qa: passed|unverified|unavailable` from the store's dirty flag.
+Only a clean whole-deck inspection calls `clear_dirty`; both QA tools are in `state._NON_EDITING_TOOLS` so the wrapper
+does not re-dirty a deck they just certified. The reviewer reaches the model either at a direct OpenAI Responses-API
+endpoint or as a DIAL Core deployment (`_resolve_provider`); Azure and DIAL's Azure upstream both reject calls without
 `?api-version=`, added by `_with_api_version`.
 
 **DIAL file I/O (`dial_client.py`).** `resolve_dial_auth_headers` implements `DIAL_AUTH_MODE`: `auto` prefers credentials

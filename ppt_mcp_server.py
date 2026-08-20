@@ -389,7 +389,7 @@ def _transport_security_for(host: str):
 
 def _registered_tool_count():
     """Number of tools the SDK ended up exposing (registration is dynamic —
-    e.g. visual_inspect_presentation is opt-in)."""
+    e.g. the visual QA tools appear only when a vision LLM is configured)."""
     try:
         return len(app._tool_manager._tools)
     except AttributeError:
@@ -397,10 +397,13 @@ def _registered_tool_count():
 
 
 def _visual_qa_status():
-    """Whether the automatic export gate will run, for the startup line."""
+    """Whether the QA tools are available, and whether the optional export
+    gate is armed, for the startup line."""
     try:
         import visual_qa
-        return "enabled" if visual_qa.enforcement_enabled() else "disabled"
+        if not visual_qa.enforcement_enabled():
+            return "disabled"
+        return "tools+export_gate" if visual_qa.export_gate_enabled() else "tools"
     except Exception:
         return "unavailable"
 

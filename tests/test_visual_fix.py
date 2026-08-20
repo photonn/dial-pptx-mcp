@@ -110,7 +110,7 @@ class TestInspectAndRepairLoop(unittest.TestCase):
             calls["review"] += 1
             return dict(v)
 
-        def fake_plan(llm, issues, pres, images):
+        def fake_plan(llm, issues, pres, images, image_slides=None):
             p = plans[min(calls["plan"], len(plans) - 1)]
             calls["plan"] += 1
             return p

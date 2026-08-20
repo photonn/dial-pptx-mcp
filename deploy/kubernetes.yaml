@@ -34,6 +34,14 @@ spec:
             # summaries, vision-LLM timings and per-repair detail.
             - name: LOG_LEVEL
               value: "INFO"
+            # Visual QA is driven by the agent through visual_inspect_slides
+            # and visual_repair_slides (registered when VISION_LLM_* is set).
+            # Uncomment to additionally make export refuse a deck that no
+            # whole-deck inspection has cleared — note this re-inspects the
+            # whole deck on export even if the agent already checked every
+            # slide, so it roughly doubles the QA cost.
+            #- name: VISUAL_QA_EXPORT_GATE
+            #  value: "true"
             - name: DIAL_CORE_URL
               value: "https://<YOUR-DIAL-CORE-HOST>"
             - name: DIAL_API_KEY

@@ -14,19 +14,22 @@ logger = get_logger("tools.presentation")
 
 
 def _visual_qa_gate(presentations, pres_id):
-    """Automatic visual QA before a deck leaves the server (export or save).
+    """Optional export gate (VISUAL_QA_EXPORT_GATE=true).
 
-    Fully internal: inspects the deck and, when issues are found, repairs it
-    in place and re-inspects (visual_qa.inspect_and_repair), so callers
-    receive a finished, verified presentation — never a fix-and-retry
-    request. Runs only when the vision LLM is configured and the deck was
-    edited since it last passed. Returns None to let the export proceed, or
-    an error dict when QA could not verify the deck.
+    Visual QA is normally orchestrator-driven — the agent calls
+    visual_inspect_slides / visual_repair_slides while it builds (see
+    tools/visual_tools.py) — and export does not inspect anything. Operators
+    who want the guarantee that no unverified deck ever leaves the server
+    turn this gate on: it runs the inspect-repair loop over the whole deck
+    when the deck was edited since it last passed, and refuses the export if
+    QA cannot verify it.
+
+    Returns None to let the export proceed, or an error dict.
     """
     import visual_qa
 
-    if not visual_qa.enforcement_enabled():
-        logger.debug("qa_gate_skipped presentation_id=%s reason=not_configured",
+    if not visual_qa.export_gate_enabled():
+        logger.debug("qa_gate_skipped presentation_id=%s reason=gate_disabled",
                      short_id(pres_id))
         return None
     if not presentations.is_dirty(pres_id):
@@ -76,6 +79,20 @@ def _visual_qa_gate(presentations, pres_id):
         if key in outcome:
             refusal[key] = outcome[key]
     return refusal
+
+
+def _visual_qa_status(presentations, pres_id):
+    """Advisory QA state of the deck being exported, for the agent's benefit.
+
+    "passed" the deck passed a whole-deck inspection and was not edited
+             since; "unverified" it has slides that no inspection has
+             cleared; "unavailable" no vision LLM is configured.
+    """
+    import visual_qa
+
+    if not visual_qa.enforcement_enabled():
+        return "unavailable"
+    return "unverified" if presentations.is_dirty(pres_id) else "passed"
 
 
 def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, get_template_search_directories):
@@ -357,11 +374,13 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         """Export the presentation to DIAL file storage and return its file URL.
 
         Use this (not save_presentation) to deliver the finished deck to the
-        user. When visual QA is enabled on the server, the deck is
-        automatically inspected first and a failing deck is refused with the
-        issue list — fix the issues and retry. ALWAYS include the returned
-        file_url in your final answer as an attachment so the user can
-        download the presentation.
+        user. Export does NOT run visual QA for you: inspect the deck with
+        visual_inspect_slides / visual_repair_slides while you build it, or
+        at least once before exporting. The response carries "visual_qa":
+        "passed" | "unverified" | "unavailable" so you can tell whether the
+        deck was ever checked. ALWAYS include the returned file_url in your
+        final answer as an attachment so the user can download the
+        presentation.
         """
         from dial_client import DialFileClient, DialConfigError, PPTX_MIME
 
@@ -385,16 +404,27 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             pres.save(buf)
             client = DialFileClient()
             file_url = client.upload(buf.getvalue(), filename)
+            qa_status = _visual_qa_status(presentations, presentation_id)
             logger.info("export_ok presentation_id=%s filename=%s slides=%d "
-                        "bytes=%d", short_id(presentation_id), filename,
-                        len(pres.slides), buf.getbuffer().nbytes)
-            return {
+                        "bytes=%d visual_qa=%s", short_id(presentation_id),
+                        filename, len(pres.slides), buf.getbuffer().nbytes,
+                        qa_status)
+            result = {
                 "message": f"Presentation exported to DIAL file storage: {file_url}. "
                            "Include this file URL in your final answer.",
                 "file_url": file_url,
                 "mime_type": PPTX_MIME,
-                "size_bytes": buf.getbuffer().nbytes
+                "size_bytes": buf.getbuffer().nbytes,
+                "visual_qa": qa_status,
             }
+            if qa_status == "unverified":
+                result["visual_qa_note"] = (
+                    "This deck was never visually inspected, or was edited "
+                    "since its last passing inspection. The export succeeded "
+                    "regardless; run visual_repair_slides if quality matters "
+                    "before you hand the file to the user."
+                )
+            return result
         except DialConfigError as e:
             logger.error("export_failed presentation_id=%s reason=dial_config "
                          "error=%s", short_id(presentation_id), e)

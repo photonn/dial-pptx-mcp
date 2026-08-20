@@ -133,9 +133,11 @@ class PresentationStore(MutableMapping):
             return entry["lock"] if entry else threading.RLock()
 
 
-# Tools that touch a presentation without editing its content: they must not
-# re-flag a passed deck as needing inspection.
-_NON_EDITING_TOOLS = {"export_presentation", "save_presentation"}
+# Tools that must not re-flag a passed deck as needing inspection: exports,
+# and the visual QA tools — visual_repair_slides does edit the deck, but it
+# re-inspects what it edited and manages the flag itself.
+_NON_EDITING_TOOLS = {"export_presentation", "save_presentation",
+                      "visual_inspect_slides", "visual_repair_slides"}
 
 
 def _elapsed_ms(started):
