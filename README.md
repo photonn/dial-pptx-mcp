@@ -41,6 +41,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
 | `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per inspection |
 | `SOFFICE_PATH` | no | `soffice` on PATH | LibreOffice binary used to render slides (the Docker image includes LibreOffice) |
+| `LOG_LEVEL` | no | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. One log line per event on stderr — see [Logging](#logging). An unrecognized value falls back to `INFO` rather than failing startup |
 
 Copy [`.env.example`](.env.example) to `.env` for local runs — the server loads it at startup, and `.env` is gitignored.
 
@@ -112,6 +113,29 @@ The internal loop runs entirely inside the single export tool call, so it consum
 | Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails the gate and blocks every export |
 
 Passed decks aren't re-inspected unless edited again, and exports skip QA entirely when the feature is unconfigured. `VISUAL_QA_ENFORCE=false` disables it; `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks); `VISUAL_QA_EXPOSE_TOOL=true` additionally exposes a standalone `visual_inspect_presentation` tool for debugging. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each loop iteration is one render plus one or two LLM calls, so a worst-case export adds a few minutes and a handful of vision-model requests.
+
+## Logging
+
+Every record is a **single line on stderr**, so `kubectl logs` shows one event per line and nothing wraps across lines:
+
+```
+2026-08-20T09:14:02.517Z INFO  dial_pptx.tools.presentation export_ok presentation_id=9f3c1a2b… filename=deck.pptx slides=12 bytes=1841203
+```
+
+`timestamp (UTC) · level · logger · message`, with details as `key=value` pairs. Multi-line content is folded onto the same line with ` | ` separators — that includes tracebacks, so a stack trace stays greppable instead of scrolling the pod terminal. FastMCP's default Rich handler (boxed, multi-line, colored) and uvicorn's separate log format are both replaced, so third-party output matches.
+
+`LOG_LEVEL` sets the verbosity of this server and the libraries under it:
+
+| Level | What you get |
+|---|---|
+| `ERROR` | Failures only: blocked exports, render/vision-LLM outages, upload failures |
+| `WARNING` | The above, plus degradations that don't fail the call: QA rounds that found issues, LRU eviction, auth falling back to the server key, skipped repair operations |
+| `INFO` (default) | One line per tool call (`tool_ok`/`tool_error` with `duration_ms`), presentation lifecycle, each QA round's verdict, exports and uploads, server startup |
+| `DEBUG` | The above, plus per-call argument summaries, render and vision-LLM timings, individual QA issues and repair operations, template content-type coercion, and the underlying HTTP client's own logs |
+
+Handles are truncated (`9f3c1a2b…`) and argument values are summarized by type and size (`template_content=<str:412880>`) rather than logged verbatim, so logs never carry a usable presentation handle, a base64 template, or slide text. Credentials are never logged.
+
+Per-subsystem tuning is available in code: loggers are nested under `dial_pptx` (`dial_pptx.visual_qa`, `dial_pptx.tool.export_presentation`, `dial_pptx.utils.template`, …), so a single subsystem can be raised or lowered independently of `LOG_LEVEL`.
 
 ## Multi-tenancy and scaling notes
 

@@ -9,6 +9,11 @@ from pptx.util import Inches, Pt
 from pptx.enum.shapes import MSO_CONNECTOR
 from pptx.dml.color import RGBColor
 
+from logging_utils import get_logger
+
+logger = get_logger("tools.connector")
+
+
 def register_connector_tools(app, presentations, get_current_presentation_id, validate_parameters, 
                           is_positive, is_non_negative, is_in_range, is_valid_rgb):
     """Register connector tools with the FastMCP app."""
@@ -84,6 +89,9 @@ def register_connector_tools(app, presentations, get_current_presentation_id, va
             if color and is_valid_rgb(color):
                 connector.line.color.rgb = RGBColor(*color)
             
+            logger.debug("connector_added slide=%s type=%s from=%s,%s to=%s,%s",
+                         slide_index, connector_type, start_x, start_y,
+                         end_x, end_y)
             return {
                 "message": f"Added {connector_type} connector to slide {slide_index}",
                 "connector_type": connector_type,

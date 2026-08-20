@@ -7,6 +7,10 @@ import os
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import utils as ppt_utils
+from logging_utils import get_logger
+from state import short_id
+
+logger = get_logger("tools.presentation")
 
 
 def _visual_qa_gate(presentations, pres_id):
@@ -22,24 +26,41 @@ def _visual_qa_gate(presentations, pres_id):
     import visual_qa
 
     if not visual_qa.enforcement_enabled():
+        logger.debug("qa_gate_skipped presentation_id=%s reason=not_configured",
+                     short_id(pres_id))
         return None
     if not presentations.is_dirty(pres_id):
+        logger.debug("qa_gate_skipped presentation_id=%s reason=already_passed",
+                     short_id(pres_id))
         return None
+    logger.info("qa_gate_start presentation_id=%s", short_id(pres_id))
     try:
         outcome = visual_qa.inspect_and_repair(presentations[pres_id])
     except visual_qa.VisualQAError as e:
         if visual_qa.fail_open_on_error():
+            logger.warning("qa_gate_failed_open presentation_id=%s error=%s",
+                           short_id(pres_id), e)
             return None
+        logger.error("qa_gate_blocked presentation_id=%s reason=inspection_error "
+                     "error=%s", short_id(pres_id), e)
         return {
             "error": f"Automatic visual QA could not run ({e}). "
                      "The export was blocked; fix the inspection setup, or "
                      "set VISUAL_QA_ON_ERROR=allow to export uninspected."
         }
     if outcome["passed"]:
+        logger.info("qa_gate_passed presentation_id=%s iterations=%d",
+                    short_id(pres_id), outcome["iterations"])
         presentations.clear_dirty(pres_id)
         return None
     if visual_qa.unresolved_policy() == "export_as_is":
+        logger.warning("qa_gate_override presentation_id=%s policy=export_as_is "
+                       "unresolved_issues=%d", short_id(pres_id),
+                       len(outcome.get("issues", [])))
         return None  # operator chose to ship best-effort decks
+    logger.error("qa_gate_blocked presentation_id=%s reason=unresolved "
+                 "iterations=%d unresolved_issues=%d", short_id(pres_id),
+                 outcome["iterations"], len(outcome.get("issues", [])))
     refusal = {
         "error": "Automatic visual QA could not bring the presentation to a "
                  f"passing state after {outcome['iterations']} internal "
@@ -76,6 +97,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         id = presentations.new_id()
         presentations[id] = pres
 
+        logger.info("presentation_created presentation_id=%s source=blank",
+                    short_id(id))
         return {
             "presentation_id": id,
             "message": f"Created new presentation with ID: {id}",
@@ -111,6 +134,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         try:
             pres = ppt_utils.create_presentation_from_template(template_path)
         except Exception as e:
+            logger.error("template_load_failed source=path path=%s error=%s",
+                         template_path, e)
             return {
                 "error": f"Failed to create presentation from template: {str(e)}"
             }
@@ -119,6 +144,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         id = presentations.new_id()
         presentations[id] = pres
 
+        logger.info("template_loaded source=path path=%s presentation_id=%s "
+                    "slides=%d layouts=%d", template_path, short_id(id),
+                    len(pres.slides), len(pres.slide_layouts))
         return {
             "presentation_id": id,
             "message": f"Created new presentation from template '{template_path}' with ID: {id}",
@@ -146,6 +174,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         try:
             pres = ppt_utils.open_presentation(file_path)
         except Exception as e:
+            logger.error("open_failed path=%s error=%s", file_path, e)
             return {
                 "error": f"Failed to open presentation: {str(e)}"
             }
@@ -154,6 +183,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         id = presentations.new_id()
         presentations[id] = pres
 
+        logger.info("presentation_opened path=%s presentation_id=%s slides=%d",
+                    file_path, short_id(id), len(pres.slides))
         return {
             "presentation_id": id,
             "message": f"Opened presentation from {file_path} with ID: {id}",
@@ -183,11 +214,15 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         # Save the presentation
         try:
             saved_path = ppt_utils.save_presentation(presentations[pres_id], file_path)
+            logger.info("presentation_saved presentation_id=%s path=%s",
+                        short_id(pres_id), saved_path)
             return {
                 "message": f"Presentation saved to {saved_path}",
                 "file_path": saved_path
             }
         except Exception as e:
+            logger.error("save_failed presentation_id=%s path=%s error=%s",
+                         short_id(pres_id), file_path, e)
             return {
                 "error": f"Failed to save presentation: {str(e)}"
             }
@@ -276,12 +311,16 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         try:
             raw = base64.b64decode(payload, validate=True)
         except (binascii.Error, ValueError):
+            logger.warning("template_decode_failed reason=invalid_base64 chars=%d",
+                           len(payload))
             return {
                 "error": "template_content is not valid base64. Pass the "
                          "template as a data: URI or base64 string (in DIAL "
                          "Quick Apps: file:data::<dial file path>)."
             }
         if not raw.startswith(b"PK"):
+            logger.warning("template_decode_failed reason=not_ooxml bytes=%d",
+                           len(raw))
             return {
                 "error": "Decoded template_content is not a .pptx/.potx file "
                          "(expected a ZIP/OOXML container)."
@@ -291,12 +330,17 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             # Handles .pptx directly and .potx via content-type coercion
             pres = ppt_utils.open_presentation_bytes(raw)
         except Exception as e:
+            logger.error("template_load_failed source=upload bytes=%d error=%s",
+                         len(raw), e)
             return {"error": f"Failed to open template: {str(e)}"}
 
         # Server-generated unguessable handle (multi-tenant safety)
         id = presentations.new_id()
         presentations[id] = pres
 
+        logger.info("template_loaded source=upload bytes=%d presentation_id=%s "
+                    "slides=%d layouts=%d", len(raw), short_id(id),
+                    len(pres.slides), len(pres.slide_layouts))
         return {
             "presentation_id": id,
             "message": f"Created new presentation from uploaded template with ID: {id}",
@@ -341,6 +385,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             pres.save(buf)
             client = DialFileClient()
             file_url = client.upload(buf.getvalue(), filename)
+            logger.info("export_ok presentation_id=%s filename=%s slides=%d "
+                        "bytes=%d", short_id(presentation_id), filename,
+                        len(pres.slides), buf.getbuffer().nbytes)
             return {
                 "message": f"Presentation exported to DIAL file storage: {file_url}. "
                            "Include this file URL in your final answer.",
@@ -349,8 +396,12 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 "size_bytes": buf.getbuffer().nbytes
             }
         except DialConfigError as e:
+            logger.error("export_failed presentation_id=%s reason=dial_config "
+                         "error=%s", short_id(presentation_id), e)
             return {"error": str(e)}
         except Exception as e:
+            logger.error("export_failed presentation_id=%s reason=%s error=%s",
+                         short_id(presentation_id), type(e).__name__, e)
             return {"error": f"Failed to export presentation to DIAL: {str(e)}"}
 
     @app.tool(

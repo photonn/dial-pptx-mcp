@@ -16,12 +16,18 @@ from typing import Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from logging_utils import get_logger
+from state import short_id
+
+logger = get_logger("tools.visual")
 
 
 def register_visual_tools(app: FastMCP, presentations):
     """Register visual inspection tools with the FastMCP app (opt-in)."""
     if os.environ.get("VISUAL_QA_EXPOSE_TOOL", "false").lower() != "true":
+        logger.debug("visual_inspect_tool_hidden reason=VISUAL_QA_EXPOSE_TOOL_unset")
         return
+    logger.info("visual_inspect_tool_exposed reason=VISUAL_QA_EXPOSE_TOOL=true")
 
     @app.tool(
         annotations=ToolAnnotations(
@@ -54,8 +60,13 @@ def register_visual_tools(app: FastMCP, presentations):
             verdict = inspect_presentation(presentations[presentation_id],
                                            reference, focus)
         except VisualQAError as e:
+            logger.error("visual_inspect_failed presentation_id=%s reason=qa_error "
+                         "error=%s", short_id(presentation_id), e)
             return {"error": str(e)}
         except Exception as e:
+            logger.error("visual_inspect_failed presentation_id=%s reason=%s "
+                         "error=%s", short_id(presentation_id),
+                         type(e).__name__, e)
             return {"error": f"Visual inspection failed: {str(e)}"}
 
         if verdict.get("passed") is True:

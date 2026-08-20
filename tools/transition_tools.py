@@ -5,6 +5,9 @@ Implements slide transition and timing capabilities.
 
 from typing import Dict, List, Optional, Any
 from mcp.types import ToolAnnotations
+from logging_utils import get_logger
+
+logger = get_logger("tools.transition")
 
 def register_transition_tools(app, presentations, get_current_presentation_id, validate_parameters, 
                           is_positive, is_non_negative, is_in_range, is_valid_rgb):
@@ -35,6 +38,8 @@ def register_transition_tools(app, presentations, get_current_presentation_id, v
         Returns:
             Dictionary with transition information
         """
+        logger.debug("transition_operation operation=%s slide=%s",
+                     operation, slide_index)
         try:
             # Get presentation
             pres_id = presentation_id or get_current_presentation_id()

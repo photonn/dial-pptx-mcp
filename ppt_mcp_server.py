@@ -5,11 +5,20 @@ Consolidated version with 20 tools organized into multiple modules.
 """
 import os
 import argparse
+import logging
 from typing import Dict, Any
 
 from dotenv import load_dotenv
 # .env next to this file, if present; real env vars take precedence
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+# Logging is configured before FastMCP is imported/instantiated: FastMCP's
+# own logging.basicConfig (RichHandler, multi-line output) is a no-op once
+# the root logger already has a handler. See logging_utils.
+from logging_utils import configure_logging, get_logger
+
+LOG_LEVEL = configure_logging()
+logger = get_logger("server")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -66,9 +75,12 @@ def get_template_search_directories():
         
         if valid_env_dirs:
             # Add default fallback directories
+            logger.debug("template_search_dirs source=PPT_TEMPLATE_PATH dirs=%s",
+                         ",".join(valid_env_dirs))
             return valid_env_dirs + ['.', './templates', './assets', './resources']
         else:
-            print(f"Warning: PPT_TEMPLATE_PATH directories not found: {template_env_path}")
+            logger.warning("template_path_missing PPT_TEMPLATE_PATH=%s "
+                           "falling_back_to=defaults", template_env_path)
     
     # Default search directories when no environment variable or invalid paths
     return ['.', './templates', './assets', './resources']
@@ -374,10 +386,38 @@ def _transport_security_for(host: str):
 
 
 # ---- Main Function ----
+
+def _registered_tool_count():
+    """Number of tools the SDK ended up exposing (registration is dynamic —
+    e.g. visual_inspect_presentation is opt-in)."""
+    try:
+        return len(app._tool_manager._tools)
+    except AttributeError:
+        return -1
+
+
+def _visual_qa_status():
+    """Whether the automatic export gate will run, for the startup line."""
+    try:
+        import visual_qa
+        return "enabled" if visual_qa.enforcement_enabled() else "disabled"
+    except Exception:
+        return "unavailable"
+
+
 def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
     # Serialize tool calls that target the same presentation (python-pptx is
     # not thread-safe); calls on different presentations run concurrently.
     serialize_per_presentation(app, presentations)
+    # Keep uvicorn's own verbosity in step with LOG_LEVEL.
+    app.settings.log_level = LOG_LEVEL
+    logger.info(
+        "server_starting transport=%s host=%s port=%s log_level=%s tools=%d "
+        "visual_qa=%s dial_core=%s",
+        transport, host, port, LOG_LEVEL, _registered_tool_count(),
+        _visual_qa_status(), "configured" if os.environ.get("DIAL_CORE_URL")
+        else "unset",
+    )
     if transport == "http":
         import asyncio
         # Set the host/port for HTTP transport (host must be 0.0.0.0 in containers)
@@ -390,12 +430,13 @@ def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
         try:
             app.run(transport='streamable-http')
         except asyncio.exceptions.CancelledError:
-            print("Server stopped by user.")
+            logger.info("server_stopped reason=cancelled")
         except KeyboardInterrupt:
-            print("Server stopped by user.")
+            logger.info("server_stopped reason=keyboard_interrupt")
         except Exception as e:
-            print(f"Error starting server: {e}")
-            
+            logger.error("server_start_failed transport=http error=%s", e,
+                         exc_info=logger.isEnabledFor(logging.DEBUG))
+
     elif transport == "sse":
         # Run the FastMCP server in SSE (Server Side Events) mode
         app.settings.host = host
@@ -403,11 +444,17 @@ def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
         security = _transport_security_for(host)
         if security is not None:
             app.settings.transport_security = security
-        app.run(transport='sse')
-        
+        try:
+            app.run(transport='sse')
+        except KeyboardInterrupt:
+            logger.info("server_stopped reason=keyboard_interrupt")
+
     else:
         # Run the FastMCP server
-        app.run(transport='stdio')
+        try:
+            app.run(transport='stdio')
+        except KeyboardInterrupt:
+            logger.info("server_stopped reason=keyboard_interrupt")
 
 if __name__ == "__main__":
     # Parse command line arguments

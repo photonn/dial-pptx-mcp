@@ -7,6 +7,11 @@ from typing import Dict, List, Optional, Any
 from mcp.types import ToolAnnotations
 from pptx.chart.data import ChartData
 
+from logging_utils import get_logger
+
+logger = get_logger("tools.chart")
+
+
 def register_chart_tools(app, presentations, get_current_presentation_id, validate_parameters, 
                           is_positive, is_non_negative, is_in_range, is_valid_rgb):
     """Register chart data management tools with the FastMCP app."""
@@ -75,6 +80,9 @@ def register_chart_tools(app, presentations, get_current_presentation_id, valida
             
             # Replace chart data
             chart.replace_data(chart_data)
+            logger.debug("chart_data_replaced slide=%s shape=%s categories=%d "
+                         "series=%d", slide_index, shape_index, len(categories),
+                         len(series_data))
             
             return {
                 "message": f"Updated chart data on slide {slide_index}, shape {shape_index}",

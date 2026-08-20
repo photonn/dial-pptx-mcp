@@ -31,6 +31,10 @@ import uuid
 
 import httpx
 
+from logging_utils import get_logger
+
+logger = get_logger("dial_client")
+
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 
@@ -49,6 +53,7 @@ def _incoming_request_headers():
         request = request_ctx.get().request
         return dict(request.headers) if request is not None else {}
     except Exception:
+        logger.debug("incoming_headers_unavailable transport=stdio_or_sdk_change")
         return {}
 
 
@@ -69,6 +74,8 @@ def resolve_dial_auth_headers(api_key=None):
     if mode != "server":
         for name in ("api-key", "authorization"):
             if name in incoming:
+                logger.debug("dial_auth_resolved mode=%s identity=caller header=%s",
+                             mode, name)
                 return {name: incoming[name]}
         if mode == "caller":
             raise DialConfigError(
@@ -81,6 +88,11 @@ def resolve_dial_auth_headers(api_key=None):
             )
     api_key = api_key or os.environ.get("DIAL_API_KEY")
     if api_key:
+        if mode == "auto" and incoming:
+            logger.warning("dial_auth_fallback mode=auto identity=server "
+                           "reason=no_caller_credentials")
+        else:
+            logger.debug("dial_auth_resolved mode=%s identity=server", mode)
         return {"Api-Key": api_key}
     raise DialConfigError(
         "No DIAL credentials: the caller forwarded no Api-Key/Authorization "
@@ -133,15 +145,24 @@ class DialFileClient:
         folder = folder or os.environ.get("DIAL_UPLOAD_FOLDER", "pptx-mcp")
         # Unique path segment so concurrent exports never collide/overwrite.
         path = f"{base}/{folder}/{uuid.uuid4().hex}/{filename}"
+        logger.debug("dial_upload_start filename=%s bytes=%d target=%s",
+                     filename, len(data), "appdata" if info.get("appdata")
+                     else "bucket")
         r = httpx.put(
             f"{self._base_url}/v1/files/{path}",
             headers=headers,
             files={"file": (filename, io.BytesIO(data), content_type)},
             timeout=self._timeout,
         )
+        if r.status_code >= 400:
+            logger.error("dial_upload_failed filename=%s bytes=%d status=%d",
+                         filename, len(data), r.status_code)
         r.raise_for_status()
         meta = r.json()
-        return meta.get("url", f"files/{path}")
+        url = meta.get("url", f"files/{path}")
+        logger.info("dial_upload_ok filename=%s bytes=%d url=%s",
+                    filename, len(data), url)
+        return url
 
     def download(self, file_url: str) -> bytes:
         """Download a DIAL file by its relative URL (files/{bucket}/{path})
@@ -157,5 +178,9 @@ class DialFileClient:
         else:
             url = f"{self._base_url}/v1/{file_url.lstrip('/')}"
         r = httpx.get(url, headers=headers, timeout=self._timeout)
+        if r.status_code >= 400:
+            logger.error("dial_download_failed url=%s status=%d",
+                         file_url, r.status_code)
         r.raise_for_status()
+        logger.info("dial_download_ok url=%s bytes=%d", file_url, len(r.content))
         return r.content

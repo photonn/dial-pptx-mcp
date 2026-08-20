@@ -20,14 +20,20 @@ The LLM endpoint speaks the OpenAI Responses API with image input
 """
 import base64
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
+
+from logging_utils import get_logger, flatten
+
+logger = get_logger("visual_qa")
 
 
 class VisualQAError(RuntimeError):
@@ -64,19 +70,30 @@ def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
             f"-env:UserInstallation=file://{profile}",
             "--convert-to", "pdf", "--outdir", str(tmp), str(src),
         ]
+        started = time.monotonic()
         proc = subprocess.run(cmd, capture_output=True, timeout=180)
         pdf = tmp / "deck.pdf"
         if proc.returncode != 0 or not pdf.exists():
+            logger.error("render_failed stage=libreoffice returncode=%d bytes=%d "
+                         "stderr=%s", proc.returncode, len(pptx_data),
+                         flatten(proc.stderr.decode(errors="replace")[-300:]))
             raise VisualQAError(
                 "LibreOffice failed to render the presentation: "
                 + proc.stderr.decode(errors="replace")[-500:]
             )
         images = []
         with pymupdf.open(pdf) as doc:
-            pages = doc.page_count if max_slides is None else min(doc.page_count, max_slides)
+            page_count = doc.page_count
+            pages = page_count if max_slides is None else min(page_count, max_slides)
             for i in range(pages):
                 pix = doc[i].get_pixmap(dpi=dpi)
                 images.append(pix.tobytes("png"))
+        if page_count > len(images):
+            logger.warning("render_truncated rendered=%d slides=%d cap=%s "
+                           "hint=raise_VISION_LLM_MAX_SLIDES",
+                           len(images), page_count, max_slides)
+        logger.debug("render_ok slides=%d dpi=%d duration_ms=%d",
+                     len(images), dpi, int((time.monotonic() - started) * 1000))
         return images
 
 
@@ -246,6 +263,8 @@ class VisionLLM:
                 return verdict
         except json.JSONDecodeError:
             pass
+        logger.warning("vision_verdict_unparseable chars=%d preview=%s",
+                       len(text), flatten(text[:200]))
         return {"passed": None, "issues": [],
                 "raw_review": text,
                 "note": "Reviewer response was not valid JSON; see raw_review."}
@@ -253,10 +272,18 @@ class VisionLLM:
     def ask(self, images: list, prompt: str, timeout: float = 300.0) -> str:
         """Send prompt + images, return the model's raw text answer."""
         url, headers = self._request_target()
-        r = httpx.post(url, headers=headers,
-                       json=self.build_payload(images, prompt), timeout=timeout)
+        payload = self.build_payload(images, prompt)
+        logger.debug("vision_request provider=%s model=%s images=%d "
+                     "prompt_chars=%d timeout_s=%.0f",
+                     self.provider, self.model, len(images), len(prompt), timeout)
+        started = time.monotonic()
+        r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        duration_ms = int((time.monotonic() - started) * 1000)
         if r.status_code != 200:
             detail = r.text[:300]
+            logger.error("vision_request_failed provider=%s model=%s status=%d "
+                         "duration_ms=%d detail=%s", self.provider, self.model,
+                         r.status_code, duration_ms, flatten(detail))
             if "api-version" in detail:
                 detail += (" — set VISION_LLM_API_VERSION to a version your "
                            "endpoint accepts (or put ?api-version=... in "
@@ -264,7 +291,10 @@ class VisionLLM:
             raise VisualQAError(
                 f"Vision LLM request failed with HTTP {r.status_code}: {detail}"
             )
-        return self.extract_text(r.json())
+        text = self.extract_text(r.json())
+        logger.debug("vision_response provider=%s model=%s duration_ms=%d "
+                     "chars=%d", self.provider, self.model, duration_ms, len(text))
+        return text
 
     def review(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
         return self.parse_verdict(self.ask(images, prompt, timeout))
@@ -280,6 +310,8 @@ class VisionLLM:
             data = json.loads(candidate)
             return data if isinstance(data, dict) else {}
         except json.JSONDecodeError:
+            logger.warning("vision_json_unparseable chars=%d preview=%s",
+                           len(text), flatten(text[:200]))
             return {}
 
 
@@ -340,6 +372,9 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None) -> dict:
         )
     verdict = llm.review(ref_images + deck_images, prompt)
     verdict["slides_reviewed"] = len(deck_images)
+    logger.info("inspection_done slides=%d reference=%s passed=%s issues=%d",
+                len(deck_images), bool(ref_images), verdict.get("passed"),
+                len(verdict.get("issues", [])))
     return verdict
 
 
@@ -367,16 +402,36 @@ def inspect_and_repair(pres) -> dict:
 
     repair_rounds = []
     verdict = {}
+    loop_started = time.monotonic()
+    logger.info("qa_loop_start slides_cap=%d max_iterations=%d",
+                max_slides, max_iterations)
     for iteration in range(1, max_iterations + 1):
+        round_started = time.monotonic()
         deck_images = _render_deck(pres, max_slides)
         verdict = llm.review(deck_images, review_prompt(False))
         verdict["slides_reviewed"] = len(deck_images)
+        issues = verdict.get("issues", [])
+        logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
+                    "duration_ms=%d", iteration, max_iterations,
+                    len(deck_images), verdict.get("passed"), len(issues),
+                    int((time.monotonic() - round_started) * 1000))
+        if logger.isEnabledFor(logging.DEBUG):
+            for issue in issues:
+                logger.debug("qa_issue iteration=%d slide=%s severity=%s "
+                             "description=%s", iteration, issue.get("slide"),
+                             issue.get("severity"),
+                             flatten(str(issue.get("description", ""))[:200]))
         if verdict.get("passed") is True:
+            logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
+                        "duration_ms=%d", iteration, len(repair_rounds),
+                        int((time.monotonic() - loop_started) * 1000))
             return {"passed": True, "iterations": iteration,
                     "repair_rounds": repair_rounds}
-        issues = verdict.get("issues", [])
         if iteration == max_iterations or not issues:
             # Out of budget, or nothing actionable (e.g. unparseable review)
+            logger.warning("qa_loop_stop reason=%s iteration=%d",
+                           "budget_exhausted" if iteration == max_iterations
+                           else "no_actionable_issues", iteration)
             break
         plan = visual_fix.plan_repairs(llm, issues, pres, deck_images)
         result = visual_fix.apply_repairs(pres, plan)
@@ -387,12 +442,20 @@ def inspect_and_repair(pres) -> dict:
             "operations_skipped": len(result["skipped"]),
         })
         if not result["applied"]:
+            logger.warning("qa_loop_stop reason=no_repair_progress iteration=%d "
+                           "operations_planned=%d operations_skipped=%d",
+                           iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
 
     out = {"passed": False,
            "iterations": len(repair_rounds) + 1,
            "repair_rounds": repair_rounds,
            "issues": verdict.get("issues", [])}
+    logger.warning("qa_loop_failed iterations=%d repair_rounds=%d "
+                   "unresolved_issues=%d duration_ms=%d policy=%s",
+                   out["iterations"], len(repair_rounds), len(out["issues"]),
+                   int((time.monotonic() - loop_started) * 1000),
+                   unresolved_policy())
     for key in ("raw_review", "note"):
         if key in verdict:
             out[key] = verdict[key]

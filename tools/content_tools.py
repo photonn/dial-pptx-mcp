@@ -9,6 +9,9 @@ import utils as ppt_utils
 import tempfile
 import base64
 import os
+from logging_utils import get_logger
+
+logger = get_logger("tools.content")
 
 
 def register_content_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, validate_parameters, is_positive, is_non_negative, is_in_range, is_valid_rgb):
@@ -63,6 +66,9 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
                     slide, color_scheme, "subtle", gradient_direction
                 )
             
+            logger.debug("slide_added slide=%d layout=%d layout_name=%s "
+                         "background=%s", slide_index, layout_index,
+                         getattr(layout, "name", "?"), background_type or "none")
             return {
                 "message": f"Added slide {slide_index} with layout {layout_index}",
                 "slide_index": slide_index,
@@ -245,6 +251,8 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         
         try:
             ppt_utils.populate_placeholder(slide, placeholder_idx, text)
+            logger.debug("placeholder_populated slide=%d placeholder=%d chars=%d",
+                         slide_index, placeholder_idx, len(text))
             return {
                 "message": f"Populated placeholder {placeholder_idx} on slide {slide_index}"
             }

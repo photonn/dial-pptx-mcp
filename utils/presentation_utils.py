@@ -8,6 +8,10 @@ import io
 import os
 import zipfile
 
+from logging_utils import get_logger
+
+logger = get_logger("utils.presentation")
+
 # OOXML content types for the main presentation part. A .potx template is
 # structurally identical to a .pptx except for this declaration, which makes
 # python-pptx reject it outright — so we rewrite it and open normally.
@@ -31,6 +35,8 @@ def coerce_template_bytes_to_presentation(data: bytes) -> bytes:
             return data
         if _TEMPLATE_MAIN_CT not in cts and _SLIDESHOW_MAIN_CT not in cts:
             return data
+        logger.debug("template_content_type_coerced kind=%s bytes=%d",
+                     "potx" if _TEMPLATE_MAIN_CT in cts else "ppsx", len(data))
         cts = cts.replace(_TEMPLATE_MAIN_CT, _PRESENTATION_MAIN_CT)
         cts = cts.replace(_SLIDESHOW_MAIN_CT, _PRESENTATION_MAIN_CT)
         out = io.BytesIO()

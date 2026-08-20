@@ -4,6 +4,10 @@ Functions for validating and fixing slide content, text fit, and layouts.
 """
 from typing import Dict, List, Optional, Any
 
+from logging_utils import get_logger, flatten
+
+logger = get_logger("utils.validation")
+
 
 def validate_text_fit(shape, text_content: str = None, font_size: int = 12) -> Dict:
     """
@@ -75,6 +79,7 @@ def validate_text_fit(shape, text_content: str = None, font_size: int = 12) -> D
         return result
         
     except Exception as e:
+        logger.warning("text_fit_check_failed error=%s", flatten(str(e)))
         result['fits'] = False
         result['error'] = str(e)
         return result
@@ -142,6 +147,8 @@ def validate_and_fix_slide(slide, auto_fix: bool = True, min_font_size: int = 8,
                         result['text_shapes_optimized'] += 1
                         
                     except Exception as e:
+                        logger.debug("autofix_font_size_failed shape=%s error=%s",
+                                     shape_name, flatten(str(e)))
                         warning = f"{shape_name}: Could not auto-fix font size: {str(e)}"
                         result['warnings'].append(warning)
             
@@ -169,6 +176,7 @@ def validate_and_fix_slide(slide, auto_fix: bool = True, min_font_size: int = 8,
         return result
         
     except Exception as e:
+        logger.warning("slide_validation_failed error=%s", flatten(str(e)))
         result['validation_passed'] = False
         result['error'] = str(e)
         return result
@@ -236,6 +244,7 @@ def validate_slide_layout(slide) -> Dict:
         return result
         
     except Exception as e:
+        logger.warning("layout_validation_failed error=%s", flatten(str(e)))
         result['layout_valid'] = False
         result['error'] = str(e)
         return result

@@ -20,8 +20,13 @@ Slide numbers are 1-based (matching the inspector's issue reports); shape
 indexes are the 0-based positions reported by describe_slides.
 """
 import json
+import logging
 
 from pptx.util import Emu, Inches, Pt
+
+from logging_utils import get_logger, flatten
+
+logger = get_logger("visual_fix")
 
 MAX_TEXT_CHARS = 4000
 FONT_PT_RANGE = (6, 96)
@@ -113,9 +118,17 @@ def plan_repairs(llm, issues, pres, deck_images):
     if slide_numbers:
         images = [deck_images[n - 1] for n in slide_numbers
                   if 0 < n <= len(deck_images)]
+    logger.debug("repair_plan_request issues=%d slides=%s images=%d",
+                 len(issues), slide_numbers or "all", len(images))
     data = llm.ask_json(images, prompt)
     ops = data.get("operations", [])
-    return ops if isinstance(ops, list) else []
+    if not isinstance(ops, list):
+        logger.warning("repair_plan_malformed keys=%s",
+                       ",".join(sorted(data)) or "-")
+        return []
+    logger.info("repair_plan_received operations=%d issues=%d",
+                len(ops), len(issues))
+    return ops
 
 
 def _in_range(v, lo_hi):
@@ -196,8 +209,17 @@ def apply_repairs(pres, operations):
                 skipped.append({"op": op, "reason": f"unknown op '{kind}'"})
                 continue
         except Exception as e:
+            logger.debug("repair_op_failed op=%s slide=%s shape_index=%s error=%s",
+                         kind, slide_no, shape_idx, flatten(str(e)))
             skipped.append({"op": op, "reason": f"apply failed: {e}"})
             continue
+        logger.debug("repair_op_applied op=%s slide=%s shape_index=%s",
+                     kind, slide_no, shape_idx)
         applied.append(op)
 
+    level = logging.WARNING if skipped else logging.INFO
+    logger.log(level, "repairs_applied applied=%d skipped=%d%s",
+               len(applied), len(skipped),
+               " reasons=" + ",".join(sorted({s["reason"].split(":")[0]
+                                              for s in skipped})) if skipped else "")
     return {"applied": applied, "skipped": skipped}

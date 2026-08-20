@@ -7,6 +7,10 @@ from typing import Dict, List, Optional, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import utils.template_utils as template_utils
+from logging_utils import get_logger
+from state import short_id
+
+logger = get_logger("tools.template")
 
 
 def register_template_tools(app: FastMCP, presentations: Dict, get_current_presentation_id):
@@ -408,6 +412,10 @@ def register_template_tools(app: FastMCP, presentations: Dict, get_current_prese
             result = template_utils.create_presentation_from_template_sequence(
                 presentations[pres_id], template_sequence, color_scheme
             )
+            logger.info("layout_templates_generated presentation_id=%s topic_chars=%d "
+                        "slides=%s scheme=%s templates=%s", short_id(pres_id),
+                        len(topic), slide_count, color_scheme,
+                        ",".join(t[0] for t in templates_to_use))
             
             return {
                 "message": f"Auto-generated {slide_count}-slide presentation on '{topic}'",

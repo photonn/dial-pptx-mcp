@@ -6,6 +6,9 @@ from typing import Dict, List, Optional, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import utils as ppt_utils
+from logging_utils import get_logger
+
+logger = get_logger("tools.structural")
 
 
 def register_structural_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, validate_parameters, is_positive, is_non_negative, is_in_range, is_valid_rgb, add_shape_direct):
@@ -117,6 +120,8 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
                         else:
                             ppt_utils.format_table_cell(cell, font_size=body_font_size)
             
+            logger.debug("table_added slide=%s rows=%s cols=%s data_rows=%s",
+                         slide_index, rows, cols, len(data) if data else 0)
             return {
                 "message": f"Added {rows}x{cols} table to slide {slide_index}",
                 "shape_index": len(slide.shapes) - 1,

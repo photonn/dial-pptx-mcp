@@ -16,11 +16,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 USER appuser
 
-# Remote MCP server defaults: streamable-http on 0.0.0.0:8000.
-# Override via PPT_MCP_TRANSPORT / PPT_MCP_HOST / PPT_MCP_PORT.
+# Remote MCP server defaults: streamable-http on 0.0.0.0:8000, one log line
+# per event on stderr. Override via PPT_MCP_TRANSPORT / PPT_MCP_HOST /
+# PPT_MCP_PORT / LOG_LEVEL.
 ENV PPT_MCP_TRANSPORT=http \
     PPT_MCP_HOST=0.0.0.0 \
-    PPT_MCP_PORT=8000
+    PPT_MCP_PORT=8000 \
+    LOG_LEVEL=INFO \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 

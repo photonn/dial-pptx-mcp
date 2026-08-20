@@ -20,11 +20,22 @@ Design (workstream 5.3):
   serialize tool calls that target the same deck (python-pptx objects are
   not thread-safe). Calls on different decks run concurrently.
 """
+import logging
 import os
 import threading
 import time
 import uuid
 from collections.abc import MutableMapping
+
+from logging_utils import get_logger, flatten
+
+logger = get_logger("state")
+
+
+def short_id(pres_id):
+    """Handles are unguessable capabilities — log only a prefix, never the
+    whole thing, so logs can be correlated without leaking a usable handle."""
+    return f"{pres_id[:8]}…" if isinstance(pres_id, str) and pres_id else "-"
 
 
 class PresentationStore(MutableMapping):
@@ -47,9 +58,13 @@ class PresentationStore(MutableMapping):
                    if now - v["last_used"] > self._ttl]
         for k in expired:
             del self._items[k]
+            logger.info("presentation_expired presentation_id=%s ttl_seconds=%d "
+                        "held=%d", short_id(k), self._ttl, len(self._items))
         while len(self._items) > self._max:
             oldest = min(self._items, key=lambda k: self._items[k]["last_used"])
             del self._items[oldest]
+            logger.warning("presentation_evicted presentation_id=%s reason=lru "
+                           "max=%d", short_id(oldest), self._max)
 
     def __setitem__(self, pres_id, pres):
         with self._lock:
@@ -62,6 +77,8 @@ class PresentationStore(MutableMapping):
                 "needs_inspection": True,
             }
             self._purge()
+            logger.info("presentation_stored presentation_id=%s held=%d",
+                        short_id(pres_id), len(self._items))
 
     def __getitem__(self, pres_id):
         with self._lock:
@@ -73,6 +90,8 @@ class PresentationStore(MutableMapping):
     def __delitem__(self, pres_id):
         with self._lock:
             del self._items[pres_id]
+            logger.debug("presentation_dropped presentation_id=%s held=%d",
+                         short_id(pres_id), len(self._items))
 
     def __contains__(self, pres_id):
         with self._lock:
@@ -98,6 +117,8 @@ class PresentationStore(MutableMapping):
             entry = self._items.get(pres_id)
             if entry:
                 entry["needs_inspection"] = False
+                logger.debug("presentation_inspection_cleared presentation_id=%s",
+                             short_id(pres_id))
 
     def is_dirty(self, pres_id):
         with self._lock:
@@ -117,6 +138,27 @@ class PresentationStore(MutableMapping):
 _NON_EDITING_TOOLS = {"export_presentation", "save_presentation"}
 
 
+def _elapsed_ms(started):
+    return int((time.monotonic() - started) * 1000)
+
+
+# Tool arguments can carry a whole base64 template or slide text; log only
+# names and sizes, never the payloads.
+def _arg_summary(kwargs, limit=200):
+    parts = []
+    for key, value in kwargs.items():
+        if key == "presentation_id":
+            continue
+        if isinstance(value, str):
+            parts.append(f"{key}=<str:{len(value)}>" if len(value) > 40
+                         else f"{key}={flatten(value)}")
+        elif isinstance(value, (list, tuple, dict)):
+            parts.append(f"{key}=<{type(value).__name__}:{len(value)}>")
+        elif value is not None:
+            parts.append(f"{key}={value}")
+    return " ".join(parts)[:limit] or "-"
+
+
 def serialize_per_presentation(app, store):
     """Wrap every registered tool so that (a) calls holding the same
     presentation_id are serialized on that deck's lock (python-pptx is not
@@ -131,9 +173,9 @@ def serialize_per_presentation(app, store):
     try:
         tools = app._tool_manager._tools
     except AttributeError:
-        print("Warning: could not install per-presentation locking "
-              "(unexpected FastMCP internals); same-deck concurrent calls "
-              "are not serialized.")
+        logger.warning(
+            "tool_locking_unavailable reason=unexpected_fastmcp_internals "
+            "impact=same_deck_calls_not_serialized")
         return
 
     def wrap(name, fn, read_only):
@@ -141,11 +183,31 @@ def serialize_per_presentation(app, store):
 
         def wrapper(*args, **kwargs):
             pres_id = kwargs.get("presentation_id")
-            with store.lock_for(pres_id):
-                result = fn(*args, **kwargs)
-            if (marks_dirty and pres_id is not None
-                    and not (isinstance(result, dict) and "error" in result)):
-                store.mark_dirty(pres_id)
+            call_logger = get_logger(f"tool.{name}")
+            call_logger.debug("tool_start tool=%s presentation_id=%s args=%s",
+                              name, short_id(pres_id), _arg_summary(kwargs))
+            started = time.monotonic()
+            try:
+                with store.lock_for(pres_id):
+                    result = fn(*args, **kwargs)
+            except Exception as e:
+                call_logger.error(
+                    "tool_raised tool=%s presentation_id=%s duration_ms=%d "
+                    "error=%s", name, short_id(pres_id),
+                    _elapsed_ms(started), e,
+                    exc_info=call_logger.isEnabledFor(logging.DEBUG))
+                raise
+            failed = isinstance(result, dict) and "error" in result
+            if failed:
+                call_logger.warning(
+                    "tool_error tool=%s presentation_id=%s duration_ms=%d "
+                    "error=%s", name, short_id(pres_id),
+                    _elapsed_ms(started), flatten(str(result["error"]))[:300])
+            else:
+                call_logger.info("tool_ok tool=%s presentation_id=%s duration_ms=%d",
+                                 name, short_id(pres_id), _elapsed_ms(started))
+                if marks_dirty and pres_id is not None:
+                    store.mark_dirty(pres_id)
             return result
         wrapper.__name__ = getattr(fn, "__name__", "tool")
         return wrapper

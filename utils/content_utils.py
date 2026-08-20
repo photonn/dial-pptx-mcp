@@ -13,6 +13,10 @@ import tempfile
 import os
 import base64
 
+from logging_utils import get_logger, flatten
+
+logger = get_logger("utils.content")
+
 
 def add_slide(presentation: Presentation, layout_index: int = 1) -> Tuple:
     """
@@ -501,8 +505,8 @@ def extract_slide_text_content(slide) -> Dict:
                 if title_text:
                     text_content["slide_title"] = title_text
                     all_texts.append(title_text)
-            except:
-                pass
+            except Exception as e:
+                logger.debug("title_extract_skipped error=%s", flatten(str(e)))
         
         # Extract text from all shapes
         for i, shape in enumerate(slide.shapes):

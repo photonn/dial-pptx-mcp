@@ -5,6 +5,9 @@ Implements hyperlink operations for text shapes and runs.
 
 from typing import Dict, List, Optional, Any
 from mcp.types import ToolAnnotations
+from logging_utils import get_logger
+
+logger = get_logger("tools.hyperlink")
 
 def register_hyperlink_tools(app, presentations, get_current_presentation_id, validate_parameters, 
                           is_positive, is_non_negative, is_in_range, is_valid_rgb):
@@ -39,6 +42,8 @@ def register_hyperlink_tools(app, presentations, get_current_presentation_id, va
         Returns:
             Dictionary with operation results
         """
+        logger.debug("hyperlink_operation operation=%s slide=%s shape=%s run=%s",
+                     operation, slide_index, shape_index, run_index)
         try:
             # Get presentation
             pres_id = presentation_id or get_current_presentation_id()

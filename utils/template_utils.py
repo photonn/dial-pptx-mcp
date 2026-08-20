@@ -14,6 +14,9 @@ from pptx.enum.text import PP_ALIGN, MSO_VERTICAL_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 import utils.content_utils as content_utils
 import utils.design_utils as design_utils
+from logging_utils import get_logger, flatten
+
+logger = get_logger("utils.template")
 
 
 class TextSizeCalculator:
@@ -123,9 +126,10 @@ class VisualEffectsManager:
                     self._apply_text_glow(text_frame, effect_config, color_scheme)
                 elif effect_type == 'outline':
                     self._apply_text_outline(text_frame, effect_config, color_scheme)
-            except Exception:
+            except Exception as e:
                 # Graceful fallback if effect application fails
-                pass
+                logger.debug("text_effect_skipped effect=%s scheme=%s error=%s",
+                             effect_type, color_scheme, flatten(str(e)))
     
     def _apply_text_shadow(self, text_frame, config: Dict, color_scheme: str) -> None:
         """Apply shadow effect to text (simplified implementation)."""
@@ -169,9 +173,10 @@ class VisualEffectsManager:
                 elif 'color' in border_config:
                     image_shape.line.color.rgb = RGBColor(*border_config['color'])
         
-        except Exception:
+        except Exception as e:
             # Graceful fallback
-            pass
+            logger.debug("image_effect_skipped effect=%s scheme=%s error=%s",
+                         effect_name, color_scheme, flatten(str(e)))
     
     def _get_color_from_scheme(self, color_scheme: str, color_role: str) -> Tuple[int, int, int]:
         """Get color from scheme (helper method)."""
@@ -497,10 +502,15 @@ def load_slide_templates(template_file_path: str = None) -> Dict:
     try:
         with open(template_file_path, 'r', encoding='utf-8') as f:
             templates = json.load(f)
+        logger.debug("layout_templates_loaded path=%s templates=%d",
+                     template_file_path, len(templates.get('templates', {})))
         return templates
     except FileNotFoundError:
+        logger.error("layout_templates_missing path=%s", template_file_path)
         raise FileNotFoundError(f"Template file not found: {template_file_path}")
     except json.JSONDecodeError as e:
+        logger.error("layout_templates_invalid path=%s error=%s",
+                     template_file_path, flatten(str(e)))
         raise ValueError(f"Invalid JSON in template file: {str(e)}")
 
 
@@ -526,6 +536,7 @@ def get_available_templates() -> List[Dict]:
         
         return template_list
     except Exception as e:
+        logger.warning("layout_templates_unavailable error=%s", flatten(str(e)))
         return [{'error': f"Failed to load templates: {str(e)}"}]
 
 

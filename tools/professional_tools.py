@@ -6,6 +6,9 @@ from typing import Dict, List, Optional, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import utils as ppt_utils
+from logging_utils import get_logger
+
+logger = get_logger("tools.professional")
 
 
 def register_professional_tools(app: FastMCP, presentations: Dict, get_current_presentation_id):
@@ -236,6 +239,9 @@ def register_professional_tools(app: FastMCP, presentations: Dict, get_current_p
                         warnings.append(f"Unknown effect type: {effect_type}")
                 
                 except Exception as e:
+                    logger.warning("picture_effect_failed slide=%s shape=%s "
+                                   "effect=%s error=%s", slide_index, shape_index,
+                                   effect_type, e)
                     warnings.append(f"Failed to apply {effect_type} effect: {str(e)}")
             
             result = {

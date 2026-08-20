@@ -5,6 +5,9 @@ Implements slide master and layout access capabilities.
 
 from typing import Dict, List, Optional, Any
 from mcp.types import ToolAnnotations
+from logging_utils import get_logger
+
+logger = get_logger("tools.master")
 
 def register_master_tools(app, presentations, get_current_presentation_id, validate_parameters, 
                           is_positive, is_non_negative, is_in_range, is_valid_rgb):
@@ -63,6 +66,8 @@ def register_master_tools(app, presentations, get_current_presentation_id, valid
             
             master = pres.slide_masters[master_index]
             
+            logger.debug("master_query operation=%s master_index=%s layout_index=%s",
+                         operation, master_index, layout_index)
             if operation == "get_layouts":
                 # Get all layouts for a specific master
                 layouts_info = []

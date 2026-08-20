@@ -12,6 +12,10 @@ import os
 from fontTools.ttLib import TTFont
 from fontTools.subset import Subsetter
 
+from logging_utils import get_logger, flatten
+
+logger = get_logger("utils.design")
+
 # Professional color schemes
 PROFESSIONAL_COLOR_SCHEMES = {
     'modern_blue': {
@@ -296,8 +300,8 @@ def set_slide_gradient_background(slide, start_color: Tuple[int, int, int],
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
                 
-    except Exception:
-        pass  # Graceful fallback
+    except Exception as e:
+        logger.debug("gradient_background_skipped error=%s", flatten(str(e)))
 
 
 def create_professional_gradient_background(slide, color_scheme: str = 'modern_blue', 
@@ -390,8 +394,8 @@ def format_shape(shape, fill_color: Tuple[int, int, int] = None,
         
         if line_width is not None:
             shape.line.width = Pt(line_width)
-    except Exception:
-        pass  # Graceful fallback
+    except Exception as e:
+        logger.debug("shape_format_skipped error=%s", flatten(str(e)))
 
 
 # Image enhancement functions
