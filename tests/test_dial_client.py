@@ -118,8 +118,44 @@ class TestDialFileClient(unittest.TestCase):
 
     def test_download_refuses_foreign_host(self):
         from dial_client import DialFileClient, DialConfigError
-        with self.assertRaises(DialConfigError):
+        with self.assertRaises(DialConfigError) as ctx:
             DialFileClient().download("https://evil.example.com/files/x/y.pptx")
+        self.assertIn("evil.example.com", str(ctx.exception))
+
+    def test_download_refuses_a_non_file_reference(self):
+        from dial_client import DialFileClient, DialConfigError
+        with self.assertRaises(DialConfigError) as ctx:
+            DialFileClient().download("just-a-name.png")
+        self.assertIn("not a DIAL file reference", str(ctx.exception))
+
+    def test_file_reference_forms_resolve_to_the_same_object(self):
+        """The upload's relative URL, the Core API path and the chat
+        frontend's api/files proxy path all name one object."""
+        from dial_client import DialFileClient
+        client = DialFileClient()
+        expected = f"{client._base_url}/v1/files/BUCKET/img/x.png"
+        for ref in ("files/BUCKET/img/x.png",
+                    "/files/BUCKET/img/x.png",
+                    "v1/files/BUCKET/img/x.png",
+                    "api/files/BUCKET/img/x.png",
+                    f"{client._base_url}/v1/files/BUCKET/img/x.png",
+                    f"{client._base_url}/api/files/BUCKET/img/x.png"):
+            self.assertEqual(client._file_request_url(ref), expected, ref)
+
+    def test_public_alias_host_is_accepted_and_fetched_from_core(self):
+        """DIAL reached in-cluster but linked publicly: the link's host is
+        allowed by DIAL_PUBLIC_URL, the request still goes to Core."""
+        from dial_client import DialFileClient, DialConfigError
+        client = DialFileClient()
+        link = "https://chat.example.com/api/files/BUCKET/img/x.png"
+        with self.assertRaises(DialConfigError):
+            client._file_request_url(link)
+        os.environ["DIAL_PUBLIC_URL"] = "https://chat.example.com"
+        try:
+            self.assertEqual(client._file_request_url(link),
+                             f"{client._base_url}/v1/files/BUCKET/img/x.png")
+        finally:
+            os.environ.pop("DIAL_PUBLIC_URL")
 
     def test_caller_mode_refuses_env_fallback(self):
         from dial_client import DialFileClient, DialConfigError

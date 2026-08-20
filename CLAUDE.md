@@ -114,7 +114,11 @@ download.
 pulled off the incoming MCP request (so exports land in the end user's own bucket — only works when the server is deployed
 under the DIAL host) and falls back to `DIAL_API_KEY`; `caller` fails instead of falling back; `server` always uses the
 server key. Templates arrive as base64/data: URIs resolved by Quick Apps, not as paths; decks leave as
-`files/{bucket}/{path}` URLs.
+`files/{bucket}/{path}` URLs. `_file_request_url` is the single gate on the download side: it accepts the relative
+form, the Core API's `v1/files/...` and the chat frontend's `api/files/...` proxy path, absolute or not, and always
+rebuilds the request against `DIAL_CORE_URL` — so a link's host is only ever an authorization question, never where
+the bytes come from. Foreign hosts are refused (`DIAL_PUBLIC_URL` lists this installation's public aliases); keep it
+that way, an MCP tool that fetches arbitrary URLs is an SSRF primitive.
 
 **Logging (`logging_utils.py`).** `configure_logging()` runs in `ppt_mcp_server.py` **before FastMCP is imported**, which is what suppresses FastMCP's RichHandler: its `logging.basicConfig` call is a no-op once the root logger has a handler. `SingleLineFormatter` folds newlines (messages and tracebacks alike) into ` | ` so every record is one line on stderr — stdout is the MCP channel on stdio transport. uvicorn is redirected by **mutating `uvicorn.config.LOGGING_CONFIG` in place**; rebinding the module attribute does nothing because `uvicorn.Config.__init__` binds it as a default argument at import time.
 

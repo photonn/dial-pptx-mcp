@@ -32,6 +32,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `DIAL_AUTH_MODE` | no | `auto` | `auto`: credentials from the incoming MCP request first (the end user's bearer, attached by Quick Apps for servers deployed under the DIAL host — exports land in that user's own bucket), falling back to `DIAL_API_KEY`. `caller`: incoming credentials only — fail loudly instead of falling back. `server`: always `DIAL_API_KEY` (single shared bucket) |
 | `DIAL_API_KEY` | no | — | Server's own DIAL API key — the fallback identity in `auto` mode, the only identity in `server` mode |
 | `DIAL_UPLOAD_FOLDER` | no | `pptx-mcp` | Folder inside the bucket for exported decks |
+| `DIAL_PUBLIC_URL` | no | — | Extra host(s) DIAL file links may carry besides `DIAL_CORE_URL` (comma-separated URLs or hostnames). Needed when the server reaches Core in-cluster but the orchestrator holds public `https://chat.example.com/api/files/...` links. The bytes are always fetched from `DIAL_CORE_URL` — only the path is taken from the link |
 | `DIAL_IMAGE_MAX_MB` | no | `20` | Largest image `add_image_from_dial_url` will download and embed. An unparsable value falls back to the default |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
@@ -123,12 +124,15 @@ Pass only one of `width`/`height` to scale proportionally, or neither to keep th
 ```text
 When a slide would be stronger with a visual — a supporting image beside the
 text, a cover image, an icon — generate it with the image model, upload it to
-DIAL file storage, and pass the returned files/... URL to
-add_image_from_dial_url. Never paste image data into the conversation. Give
+DIAL file storage, and pass the file URL the upload returned to
+add_image_from_dial_url. Never paste image data into the conversation, and
+never pass a public web URL — that tool only reads DIAL file storage. Give
 width and height for the box you want it to fill and leave fit at "contain"
 so the image is not distorted; for a text-left/image-right slide use roughly
 half the slide width for each.
 ```
+
+**What counts as an image URL.** A DIAL file reference: the `files/{bucket}/{path}` URL an upload returns, or the full https URL of that file on this DIAL installation — the `.../api/files/{bucket}/{path}` link an image deployment hands back is accepted as-is, as is the Core API's `/v1/files/...` form. Arbitrary web URLs are refused: this server is not a web fetcher, and an agent that finds a picture online must store it in DIAL file storage before inserting it. If your file links carry a different hostname than `DIAL_CORE_URL` (public chat host vs. in-cluster service), list it in `DIAL_PUBLIC_URL`.
 
 Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
 

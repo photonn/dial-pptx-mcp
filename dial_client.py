@@ -24,10 +24,14 @@ Environment variables (all optional unless DIAL upload/download is used):
 - DIAL_CORE_URL       Base URL of DIAL Core, e.g. https://dial.example.com
 - DIAL_API_KEY        Fallback API key when the caller forwards no credentials
 - DIAL_UPLOAD_FOLDER  Folder inside the bucket for exports (default: pptx-mcp)
+- DIAL_PUBLIC_URL     Extra host(s) that DIAL file links may carry besides
+                      DIAL_CORE_URL (comma-separated URLs or hostnames), for
+                      installations reached in-cluster but linked publicly
 """
 import io
 import os
 import uuid
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -100,6 +104,22 @@ def resolve_dial_auth_headers(api_key=None):
     )
 
 
+def _extra_file_hosts():
+    """Hosts a DIAL file link may legitimately carry besides DIAL_CORE_URL.
+
+    A deployment commonly reaches DIAL Core by its in-cluster URL while the
+    links the orchestrator holds carry the public DIAL Chat hostname.
+    DIAL_PUBLIC_URL lists those aliases; the bytes are still always fetched
+    from DIAL_CORE_URL — only the path is taken from the link.
+    """
+    hosts = set()
+    for entry in os.environ.get("DIAL_PUBLIC_URL", "").split(","):
+        entry = entry.strip()
+        if entry:
+            hosts.add(urlsplit(entry).netloc or entry)
+    return hosts
+
+
 class DialFileClient:
     def __init__(self, base_url=None, api_key=None, timeout=60.0):
         base_url = base_url or os.environ.get("DIAL_CORE_URL")
@@ -164,19 +184,53 @@ class DialFileClient:
                     filename, len(data), url)
         return url
 
-    def download(self, file_url: str) -> bytes:
-        """Download a DIAL file by its relative URL (files/{bucket}/{path})
-        or absolute URL under DIAL_CORE_URL."""
-        headers = self._auth_headers()
-        if file_url.startswith(("http://", "https://")):
-            if not file_url.startswith(self._base_url + "/"):
+    def _file_request_url(self, file_url):
+        """Map a DIAL file reference to this server's Files API URL.
+
+        Accepts the relative form the upload returns (files/{bucket}/{path}),
+        the Core API path (v1/files/...) and the chat frontend's proxy path
+        (api/files/...), absolute or not. Anything else — in particular an
+        arbitrary web URL — is refused: this server is not a web fetcher.
+        """
+        ref = (file_url or "").strip()
+        if ref.startswith(("http://", "https://")):
+            parts = urlsplit(ref)
+            allowed = {urlsplit(self._base_url).netloc} | _extra_file_hosts()
+            if parts.netloc not in allowed:
+                logger.warning("dial_download_refused host=%s reason="
+                               "not_dial_core", parts.netloc)
                 raise DialConfigError(
-                    "Refusing to download from a host other than DIAL_CORE_URL."
+                    f"Refusing to download from {parts.netloc}: this server "
+                    "reads files from DIAL file storage only, never arbitrary "
+                    "web URLs. Save the file to DIAL file storage first and "
+                    "pass the 'files/{bucket}/{path}' URL that upload "
+                    f"returned. (If {parts.netloc} is this DIAL installation "
+                    "under another name, the operator can list it in "
+                    "DIAL_PUBLIC_URL.)"
                 )
-            url = f"{self._base_url}/v1/files/{file_url[len(self._base_url) + 1:]}" \
-                if not file_url.startswith(f"{self._base_url}/v1/files/") else file_url
-        else:
-            url = f"{self._base_url}/v1/{file_url.lstrip('/')}"
+            ref = parts.path
+        ref = ref.lstrip("/")
+        # The same object is linked as v1/files/... by the Core API and as
+        # api/files/... by the chat frontend's proxy.
+        for prefix in ("v1/", "api/"):
+            if ref.startswith(prefix):
+                ref = ref[len(prefix):]
+                break
+        if not ref.startswith("files/"):
+            raise DialConfigError(
+                f"'{file_url}' is not a DIAL file reference. Expected "
+                "files/{bucket}/{path} — the URL returned when the file was "
+                "uploaded to DIAL file storage."
+            )
+        return f"{self._base_url}/v1/{ref}"
+
+    def download(self, file_url: str) -> bytes:
+        """Download a DIAL file by its relative URL (files/{bucket}/{path}),
+        or by an absolute URL on this DIAL installation."""
+        # Validate the reference before resolving credentials, so a bad URL
+        # is reported as a bad URL rather than as a credentials problem.
+        url = self._file_request_url(file_url)
+        headers = self._auth_headers()
         r = httpx.get(url, headers=headers, timeout=self._timeout)
         if r.status_code >= 400:
             logger.error("dial_download_failed url=%s status=%d",

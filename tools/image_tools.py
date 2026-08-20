@@ -121,10 +121,17 @@ def register_image_tools(app: FastMCP, presentations):
         """Place an image that already lives in DIAL file storage onto a slide.
 
         Use this for generated imagery: call your image model, save the result
-        to DIAL files, then pass the short "files/{bucket}/{path}" URL here.
-        The server downloads the bytes itself, so nothing large passes through
-        your context — prefer this over manage_image(source_type="base64") for
-        anything bigger than a small icon.
+        to DIAL files, then pass the file URL here. The server downloads the
+        bytes itself, so nothing large passes through your context — prefer
+        this over manage_image(source_type="base64") for anything bigger than
+        a small icon.
+
+        image_url: a DIAL file reference — the "files/{bucket}/{path}" URL an
+        upload returns, or the full https URL of that file on this DIAL
+        installation (the ".../api/files/{bucket}/{path}" link an image
+        deployment hands back works as-is). Arbitrary web URLs are NOT
+        downloaded: to use a picture from the web, fetch it yourself and store
+        it in DIAL file storage first.
 
         slide_index: 0-based, like the other content tools (visual QA slide
         numbers are 1-based; slide_index 0 is slide 1).
@@ -174,7 +181,8 @@ def register_image_tools(app: FastMCP, presentations):
             return {"error": f"Failed to download the image from DIAL file "
                              f"storage: {str(e)}. Pass the file URL exactly as "
                              f"the upload returned it, e.g. "
-                             f"files/{{bucket}}/{{path}}."}
+                             f"files/{{bucket}}/{{path}}, and check the file "
+                             f"still exists."}
 
         limit = _max_bytes()
         if len(data) > limit:

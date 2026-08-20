@@ -68,6 +68,12 @@ class ImageToolTestCase(unittest.TestCase):
             kwargs.setdefault("image_url", "files/BUCKET/img/x.png")
             return self.add_image(**kwargs)
 
+    def add_image_raw(self, **kwargs):
+        """Invoke the tool with the real DialFileClient (HTTP stubbed out)."""
+        kwargs.setdefault("presentation_id", self.pid)
+        kwargs.setdefault("slide_index", 0)
+        return self.add_image(**kwargs)
+
     def picture(self):
         return self.store[self.pid].slides[0].shapes[-1]
 
@@ -178,6 +184,50 @@ class TestPlacement(ImageToolTestCase):
         self.assertEqual(result["shape_index"],
                          len(self.store[self.pid].slides[0].shapes) - 1)
         self.assertEqual(result["size_bytes"], len(png_bytes(800, 400)))
+
+
+class TestUrlAcceptance(ImageToolTestCase):
+    """No stubbing of DialFileClient here: a web URL must be refused before
+    any HTTP request is made, and reported as an error dict, not raised."""
+
+    def setUp(self):
+        super().setUp()
+        self._core = os.environ.get("DIAL_CORE_URL")
+        os.environ["DIAL_CORE_URL"] = "https://dial.example.com"
+
+    def tearDown(self):
+        super().tearDown()
+        if self._core is None:
+            os.environ.pop("DIAL_CORE_URL", None)
+        else:
+            os.environ["DIAL_CORE_URL"] = self._core
+
+    def test_public_web_url_is_refused_with_instructions(self):
+        result = self.add_image(
+            presentation_id=self.pid, slide_index=0,
+            image_url="https://upload.wikimedia.org/wikipedia/commons/x.jpg")
+        self.assertIn("error", result)
+        self.assertIn("DIAL file storage", result["error"])
+        self.assertEqual(len(self.store[self.pid].slides[0].shapes), 0)
+
+    def test_dial_chat_link_is_accepted(self):
+        """The .../api/files/... form an image deployment returns reaches the
+        Files API instead of 404ing on a mangled path."""
+        seen = {}
+
+        def fake_get(url, headers=None, timeout=None):
+            seen["url"] = url
+            return MagicMock(status_code=200, content=png_bytes(64, 64),
+                             raise_for_status=lambda: None)
+
+        with patch("dial_client.httpx.get", fake_get), \
+                patch("dial_client.resolve_dial_auth_headers",
+                      return_value={"Api-Key": "k"}):
+            result = self.add_image_raw(
+                image_url="https://dial.example.com/api/files/BUCKET/img/x.png")
+        self.assertNotIn("error", result)
+        self.assertEqual(seen["url"],
+                         "https://dial.example.com/v1/files/BUCKET/img/x.png")
 
 
 if __name__ == "__main__":
