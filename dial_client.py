@@ -104,6 +104,16 @@ def resolve_dial_auth_headers(api_key=None):
     )
 
 
+def identity_label():
+    """Which credentials a call would use right now — for error messages
+    only; the real resolution happens in resolve_dial_auth_headers."""
+    if os.environ.get("DIAL_AUTH_MODE", "auto").lower() != "server":
+        incoming = _incoming_request_headers()
+        if "api-key" in incoming or "authorization" in incoming:
+            return "the caller's forwarded credentials"
+    return "the server's DIAL_API_KEY"
+
+
 def _extra_file_hosts():
     """Hosts a DIAL file link may legitimately carry besides DIAL_CORE_URL.
 
@@ -224,6 +234,46 @@ class DialFileClient:
             )
         return f"{self._base_url}/v1/{ref}"
 
+    def _access_hint(self, url, status):
+        """Explain a 401/403/404 on a file read in terms of *whose* storage
+        was read. DIAL file storage is per-user and, inside appdata, also
+        per-deployment: credentials reach their own bucket and their own
+        appdata folder, nothing else. That is the usual reason an image
+        another deployment just generated is unreachable from here."""
+        path = url.split("/v1/files/", 1)[-1]
+        wanted, _, rest = path.partition("/")
+        identity = identity_label()
+        parts = []
+        try:
+            owned = self.get_bucket()
+        except Exception:
+            owned = None
+        if owned and owned != wanted:
+            parts.append(f"This read ran as {identity}, which owns bucket "
+                         f"{owned[:8]}…, while the file is in bucket "
+                         f"{wanted[:8]}….")
+        else:
+            parts.append(f"This read ran as {identity}.")
+        segments = rest.split("/")
+        if segments[0] == "appdata" and len(segments) > 1:
+            parts.append(
+                f"The file also sits in the appdata folder of the "
+                f"'{segments[1]}' deployment, which only that deployment and "
+                f"the user who owns the bucket may read — this server is "
+                f"neither unless DIAL forwards the end user's own credentials "
+                f"to it."
+            )
+        parts.append(
+            "Fix it at the source: have the orchestrator copy the image into "
+            "storage these credentials can reach (its own file space, or the "
+            "user's bucket root) and pass that URL, or deploy this MCP server "
+            "under the DIAL host so DIAL Quick Apps forwards the end user's "
+            "credentials (DIAL_AUTH_MODE=auto then reads as the file's "
+            "owner). For a small image, manage_image(source_type=\"base64\") "
+            "sidesteps DIAL storage entirely."
+        )
+        return f"DIAL Core refused this file ({status}). " + " ".join(parts)
+
     def download(self, file_url: str) -> bytes:
         """Download a DIAL file by its relative URL (files/{bucket}/{path}),
         or by an absolute URL on this DIAL installation."""
@@ -233,8 +283,11 @@ class DialFileClient:
         headers = self._auth_headers()
         r = httpx.get(url, headers=headers, timeout=self._timeout)
         if r.status_code >= 400:
-            logger.error("dial_download_failed url=%s status=%d",
-                         file_url, r.status_code)
+            logger.error("dial_download_failed url=%s status=%d identity=%s",
+                         file_url, r.status_code,
+                         "caller" if "caller" in identity_label() else "server")
+        if r.status_code in (401, 403, 404):
+            raise DialConfigError(self._access_hint(url, r.status_code))
         r.raise_for_status()
         logger.info("dial_download_ok url=%s bytes=%d", file_url, len(r.content))
         return r.content

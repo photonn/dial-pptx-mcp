@@ -22,6 +22,21 @@ class _StubDial(BaseHTTPRequestHandler):
         return self.headers.get("Api-Key") == "test-key"
 
     def do_GET(self):
+        files = re.match(r"^/v1/files/([^/]+)/(.+)$", self.path)
+        if files and self._authed():
+            # DIAL storage is per-user: anything outside this caller's own
+            # bucket comes back 403, as Core does.
+            if files.group(1) != "STUBBUCKET":
+                self.send_response(403)
+                self.end_headers()
+                return
+            body = b"FILEBYTES"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/v1/bucket" and self._authed():
             body = {"bucket": "STUBBUCKET"}
             if _StubDial.appdata:
@@ -156,6 +171,27 @@ class TestDialFileClient(unittest.TestCase):
                              f"{client._base_url}/v1/files/BUCKET/img/x.png")
         finally:
             os.environ.pop("DIAL_PUBLIC_URL")
+
+    def test_download_returns_bytes_from_the_callers_own_bucket(self):
+        from dial_client import DialFileClient
+        self.assertEqual(
+            DialFileClient().download("files/STUBBUCKET/img/x.png"),
+            b"FILEBYTES")
+
+    def test_forbidden_download_explains_whose_storage_was_read(self):
+        """A 403 is an identity problem; the message has to say which
+        identity, whose bucket, and what to do — an agent cannot act on
+        'Client error 403'."""
+        from dial_client import DialFileClient, DialConfigError
+        with self.assertRaises(DialConfigError) as ctx:
+            DialFileClient().download(
+                "files/OTHERBUCKET/appdata/gpt-image-1.5-square/img/x.png")
+        message = str(ctx.exception)
+        self.assertIn("403", message)
+        self.assertIn("STUBBUCK", message)      # the identity's own bucket
+        self.assertIn("OTHERBUC", message)      # the file's bucket
+        self.assertIn("gpt-image-1.5-square", message)  # the appdata owner
+        self.assertIn("DIAL_API_KEY", message)
 
     def test_caller_mode_refuses_env_fallback(self):
         from dial_client import DialFileClient, DialConfigError

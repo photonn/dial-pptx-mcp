@@ -367,6 +367,40 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
     @app.tool(
         annotations=ToolAnnotations(
+            title="Get DIAL Storage Info",
+            readOnlyHint=True,
+        ),
+    )
+    def get_dial_storage_info() -> Dict:
+        """Report which DIAL file storage this server can actually read and
+        write on this request: the identity in use, the bucket it owns, and
+        its appdata path.
+
+        Use it when a file URL is refused: DIAL storage is per-user, so a
+        file whose URL names a different bucket than the one reported here
+        cannot be downloaded, however valid the URL looks.
+        """
+        from dial_client import DialFileClient, DialConfigError, identity_label
+
+        try:
+            info = DialFileClient().get_bucket_info()
+        except DialConfigError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            logger.error("dial_storage_info_failed reason=%s error=%s",
+                         type(e).__name__, e)
+            return {"error": f"Could not reach DIAL file storage: {str(e)}"}
+        return {
+            "identity": identity_label(),
+            "bucket": info.get("bucket"),
+            "appdata": info.get("appdata"),
+            "note": "add_image_from_dial_url can only read files under this "
+                    "bucket (and export writes under it). A URL naming any "
+                    "other bucket will be refused by DIAL Core.",
+        }
+
+    @app.tool(
+        annotations=ToolAnnotations(
             title="Export Presentation to DIAL Files",
         ),
     )

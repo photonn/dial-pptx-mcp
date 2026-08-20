@@ -132,6 +132,10 @@ so the image is not distorted; for a text-left/image-right slide use roughly
 half the slide width for each.
 ```
 
+**Whose storage the server can read.** DIAL file storage is per-user, and inside `appdata` it is also per-deployment: credentials reach their own bucket and their own appdata folder, nothing else. An image an *image deployment* generated lands in `{user-bucket}/appdata/{that-deployment}/...`, which this server can read only when DIAL forwards the end user's own credentials to it — i.e. when the server is deployed under the DIAL host (`DIAL_AUTH_MODE=auto` then reads as the user). With the server falling back to its own `DIAL_API_KEY`, DIAL Core answers `403` and the tool reports which identity it used, which bucket that identity owns, and which bucket the file is in.
+
+Call `get_dial_storage_info` to see that identity directly — it returns the bucket and appdata path this server actually has on the current request. If the bucket it reports is not the bucket in your image URL, no URL fix will help: either deploy under the DIAL host, have the orchestrator store the image where the server's credentials can reach it, or fall back to `manage_image(source_type="base64")` for that one image.
+
 **What counts as an image URL.** A DIAL file reference: the `files/{bucket}/{path}` URL an upload returns, or the full https URL of that file on this DIAL installation — the `.../api/files/{bucket}/{path}` link an image deployment hands back is accepted as-is, as is the Core API's `/v1/files/...` form. Arbitrary web URLs are refused: this server is not a web fetcher, and an agent that finds a picture online must store it in DIAL file storage before inserting it. If your file links carry a different hostname than `DIAL_CORE_URL` (public chat host vs. in-cluster service), list it in `DIAL_PUBLIC_URL`.
 
 Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
