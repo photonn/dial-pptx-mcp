@@ -69,9 +69,21 @@ LLM is configured, `register_visual_tools` exposes `visual_inspect_slides` (read
 (review → repair → re-review loop), both taking an optional 1-based `slides` list so the orchestrator can check the one
 slide it just built, as often as it likes. Pipeline: render via LibreOffice → PDF → PNG, vision-LLM review, then
 `visual_fix.plan_repairs` asks the model for a plan of **whitelisted, validated** operations
-(move/resize/font-size/set-text/word-wrap/delete) applied with python-pptx, re-render, repeat up to
+(move/resize/font-size/fit-text/autofit/set-text/word-wrap/delete, plus table column-width/row-height/cell-text and
+chart legend/data-label toggles) applied with python-pptx, re-render, repeat up to
 `VISUAL_QA_MAX_ITERATIONS`. Keep repairs whitelist-driven — never execute model-supplied code or widen the operation set
 without validation.
+
+Text in a deck is not only in text frames, and both halves of the loop must keep covering the rest: `REVIEW_PROMPT`
+asks explicitly about chart axis/data labels, table cells and diagram/SmartArt node labels, and `describe_slides`
+reports table geometry and chart structure so the planner can address them. A new "text container" needs work in both
+places plus an operation in `apply_repairs` — a reported issue that no whitelisted op can fix just burns iterations
+until the budget runs out.
+
+`fit_text` computes its own size (`estimate_fit_font_size`) instead of taking one from the model, and grows as well as
+shrinks. The geometric estimate (`CHAR_WIDTH_RATIO`, `LINE_HEIGHT_RATIO`, `FIT_SLACK`) is deliberately crude — the
+re-render is the real check — but the growth cap (`MAX_GROWTH_FACTOR`, `DEFAULT_GROWTH_CEILING_PT`) is policy, not
+approximation: without it any short string "fits" at the 96pt ceiling.
 
 Slide scoping runs through the whole stack and must stay consistent: LibreOffice always converts the entire deck, so a
 subset only selects pages to rasterize; `image_slides` maps images back to absolute slide numbers for `plan_repairs`; and

@@ -148,15 +148,43 @@ rendered slide images of a PowerPoint deck generated from a corporate template{r
 Check every slide for:
 1. Template/brand fidelity: consistent colors, fonts, logo placement, and layout \
 usage matching the deck's own master style{ref_clause}.
-2. Visible errors: text overflowing or clipped by its container, overlapping \
-elements, elements off the slide edge, placeholder text left unfilled (e.g. \
-"Click to add title"), broken or empty charts/tables/images, illegible text \
-(too small or poor contrast), inconsistent alignment or spacing.
+2. Text placement and overlap, ANYWHERE text appears — not just in text boxes. \
+Judge the rendered pixels, not what the text probably says:
+   - Text overflowing, clipped, or spilling outside its container or the slide edge.
+   - Text overlapping other text, or sitting on top of shapes, images or lines in \
+a way that makes either hard to read.
+   - Charts and graphs: axis tick labels colliding with each other or truncated \
+("..." or cut-off words), data labels overlapping their bars/slices/points or each \
+other, a legend covering the plot area or running off the chart, an axis title \
+squeezed or rotated into illegibility, series labels detached from what they label.
+   - Tables: cell text wrapping into an unreadable stack, clipped by the cell or \
+row height, columns too narrow for their content, headers not aligned with their \
+columns, a table extending past the slide.
+   - Diagrams, SmartArt and grouped shapes: labels wider than the node or box that \
+holds them, text escaping a connector or arrow, node labels overlapping neighbouring \
+nodes or connectors.
+   - Text that is too small to read at presentation size, or too low-contrast \
+against what is behind it.
+   - Text sized badly for the space it occupies: a heading or body block set so \
+small that its box is mostly empty, or comparable elements on one slide set at \
+visibly different sizes for no reason. Text should fill its container \
+comfortably without crowding it or its neighbours — report both the starved and \
+the overstuffed cases, but do not ask for larger text where growing it would \
+eat the slide's white space.
+3. Other visible errors: elements off the slide edge, placeholder text left \
+unfilled (e.g. "Click to add title"), broken or empty charts/tables/images, \
+inconsistent alignment or spacing between comparable elements.
+
+Report each problem separately, naming the element it affects (e.g. "chart on the \
+right: x-axis labels overlap"), and say in "suggested_fix" what change would resolve \
+it (resize, reposition, shorten the text, smaller font, wider column, hide the \
+legend).
 
 Respond with ONLY a JSON object, no markdown fence:
 {{"passed": true|false, "issues": [{{"slide": <1-based number>, "severity": \
 "critical"|"major"|"minor", "description": "...", "suggested_fix": "..."}}]}}
-"passed" is true only when there are no critical or major issues."""
+Unreadable or overlapping text is at least a major issue. "passed" is true only \
+when there are no critical or major issues."""
 
 
 class VisionLLMConfigError(VisualQAError):

@@ -103,8 +103,8 @@ When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools
 
 | Tool | What it does |
 |---|---|
-| `visual_inspect_slides(presentation_id, slides?, focus?, reference_presentation_id?)` | Renders the selected slides (LibreOffice → PDF → PNG) and has the vision LLM review them for template/brand fidelity and visible errors (overflowing or clipped text, overlaps, elements off the slide, unfilled placeholders, broken charts, illegibility). Read-only: returns `{"passed", "issues": [{slide, severity, description, suggested_fix}]}` |
-| `visual_repair_slides(presentation_id, slides?, focus?, max_iterations?)` | Inspects, then **repairs the deck itself** and re-inspects, looping until the slides pass or the budget runs out. The LLM is shown the issues, the affected slides' structure and their images, and returns a plan of whitelisted operations (move/resize shape, set font size, set text, word wrap, delete shape) that are validated and applied with python-pptx |
+| `visual_inspect_slides(presentation_id, slides?, focus?, reference_presentation_id?)` | Renders the selected slides (LibreOffice → PDF → PNG) and has the vision LLM review them for template/brand fidelity and text placement problems (see below). Read-only: returns `{"passed", "issues": [{slide, severity, description, suggested_fix}]}` |
+| `visual_repair_slides(presentation_id, slides?, focus?, max_iterations?)` | Inspects, then **repairs the deck itself** and re-inspects, looping until the slides pass or the budget runs out. The LLM is shown the issues, the affected slides' structure and their images, and returns a plan of whitelisted operations (move/resize shape, set/fit font size, autofit, set text, word wrap, delete shape, table column width/row height/cell text, chart legend and data labels) that are validated and applied with python-pptx |
 
 `slides` is a list of 1-based slide numbers; omit it to work on the whole deck. Issue slide numbers are always absolute deck positions, even when only a subset was rendered, and a scoped repair call never touches a slide outside `slides`. Because LibreOffice converts the whole deck either way, a narrow selection saves the vision call and the repair round, not the render.
 
@@ -115,6 +115,23 @@ When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools
 `export_presentation` does **not** run QA. It reports what it knows — `"visual_qa": "passed" | "unverified" | "unavailable"` — and adds a note when the deck was never inspected or was edited since its last passing inspection. Only a clean whole-deck inspection marks a deck `passed`; a scoped call clears nothing.
 
 Operators who want the old guarantee that no unverified deck ever leaves the server set `VISUAL_QA_EXPORT_GATE=true`: export/save then run the whole-deck inspect-repair loop for dirty decks and refuse the export if it cannot reach a pass. With the gate on, `VISUAL_QA_ON_UNRESOLVED` chooses `report` (default — fail the export with the unresolved issue list) or `export_as_is`, and `VISUAL_QA_ON_ERROR=allow` lets exports through when inspection itself cannot run (renderer/LLM outage — default blocks). Both variables are inert while the gate is off.
+
+### What the reviewer checks
+
+Text is not only in text boxes, so neither is the review. Besides brand fidelity (colors, fonts, logo placement, layout usage) the reviewer is asked to judge **text placement and overlap wherever text is rendered**:
+
+- **Text boxes and placeholders** — overflowing, clipped, or spilling past the slide edge; text overlapping other text or sitting unreadably on top of shapes and images; unfilled placeholders; text too small or too low-contrast to read.
+- **Charts and graphs** — axis tick labels colliding with each other or truncated, data labels overlapping their bars/slices or each other, a legend covering the plot area, an axis title rotated into illegibility.
+- **Tables** — cell text wrapping into an unreadable stack or clipped by the row height, columns too narrow for their content, headers misaligned with their columns, a table running past the slide.
+- **Diagrams, SmartArt and grouped shapes** — labels wider than the node that holds them, text escaping a connector, node labels overlapping their neighbours.
+
+It also flags text sized badly for the space it occupies — a heading set so small its box is mostly empty, or comparable elements at visibly different sizes — while being told not to ask for bigger text where growing it would eat the slide's white space.
+
+Overlapping or unreadable text is graded at least `major`, so it fails the verdict rather than being noted in passing.
+
+**Fitting text to its box.** The `fit_text` operation sizes text to the space it actually has, in both directions: it shrinks text that overflows and grows text that leaves its box mostly empty. The size is computed server-side from the box geometry (minus the frame's own margins, with a slack factor so text never touches its border) rather than guessed by the model, and the plan can bound it with `min_pt`/`max_pt`. Growth is anchored to the deck's own typography — at most 1.5× the shape's current size, or 44pt when the text inherits its size from the layout — so a two-word box cannot balloon to 96pt and shout over the slide. `set_autofit` sets PowerPoint's own autofit behaviour (`shrink_text`, `grow_shape`, `none`) when that suits the shape better. The size estimate is geometric, not a real text layout; the loop's re-render and re-review is what confirms it.
+
+The repair engine can act on all of it: `describe_slides` hands the planner each table's column widths, row heights and cell text, and each chart's type, categories, series count and label/legend state — so a plan can widen a column, raise a row, retitle a cell, shrink a whole table's or chart's font, hide crowded data labels, or move the legend, instead of only nudging the container. Members of a group are not individually addressable; the group is moved, resized or shrunk as a whole.
 
 ### Telling the agent to use it
 

@@ -9,19 +9,38 @@ with python-pptx. The gate then re-inspects; see _visual_qa_gate in
 tools/presentation_tools.py for the loop.
 
 Whitelisted operations (anything else in a plan is skipped and reported):
-- move_shape    {slide, shape_index, left_in, top_in}
-- resize_shape  {slide, shape_index, width_in?, height_in?}
-- set_font_size {slide, shape_index, size_pt}
-- set_text      {slide, shape_index, text}
-- set_word_wrap {slide, shape_index, wrap: true|false}
-- delete_shape  {slide, shape_index}
+- move_shape       {slide, shape_index, left_in, top_in}
+- resize_shape     {slide, shape_index, width_in?, height_in?}
+- set_font_size    {slide, shape_index, size_pt}  text box, table or chart
+- fit_text         {slide, shape_index, min_pt?, max_pt?}  size text to its box
+- set_autofit      {slide, shape_index, mode: shrink_text|grow_shape|none}
+- set_text         {slide, shape_index, text}
+- set_word_wrap    {slide, shape_index, wrap: true|false}
+- delete_shape     {slide, shape_index}
+- set_column_width {slide, shape_index, column, width_in}
+- set_row_height   {slide, shape_index, row, height_in}
+- set_cell_text    {slide, shape_index, row, column, text}
+- set_chart_legend {slide, shape_index, show, position?}
+- set_chart_data_labels {slide, shape_index, show}
+
+fit_text sizes text to the space it actually has — growing text that leaves
+its box mostly empty as readily as shrinking text that overflows — with
+growth anchored to the deck's existing typography so a two-word box does not
+balloon to 96pt.
+
+Text is not only in text boxes: the table and chart operations exist so crowded
+table columns and colliding chart labels — the most common overlap the
+reviewer reports — are actually fixable instead of being reported forever.
 
 Slide numbers are 1-based (matching the inspector's issue reports); shape
 indexes are the 0-based positions reported by describe_slides.
 """
 import json
 import logging
+import math
 
+from pptx.enum.chart import XL_LEGEND_POSITION
+from pptx.enum.text import MSO_AUTO_SIZE
 from pptx.util import Emu, Inches, Pt
 
 from logging_utils import get_logger, flatten
@@ -32,15 +51,184 @@ MAX_TEXT_CHARS = 4000
 FONT_PT_RANGE = (6, 96)
 POSITION_IN_RANGE = (-5.0, 60.0)
 SIZE_IN_RANGE = (0.05, 60.0)
+AUTOFIT_MODES = {
+    "shrink_text": MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
+    "grow_shape": MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT,
+    "none": MSO_AUTO_SIZE.NONE,
+}
+# Text-fitting estimate. A rendered line of a proportional face averages
+# roughly half the point size in width per character, and PowerPoint's
+# single line spacing is about 1.2x the point size. Both are approximations:
+# fit_text lands close, and the QA loop's re-render is what actually
+# confirms it.
+CHAR_WIDTH_RATIO = 0.5
+LINE_HEIGHT_RATIO = 1.2
+# Leave the text a little clear of its own border rather than filling the
+# box to the pixel — text touching the frame reads as overcrowded.
+FIT_SLACK = 0.92
+LEGEND_POSITIONS = {
+    "bottom": XL_LEGEND_POSITION.BOTTOM,
+    "top": XL_LEGEND_POSITION.TOP,
+    "left": XL_LEGEND_POSITION.LEFT,
+    "right": XL_LEGEND_POSITION.RIGHT,
+    "corner": XL_LEGEND_POSITION.CORNER,
+}
 
 
 def _emu_to_in(v):
     return round(Emu(v).inches, 3) if v is not None else None
 
 
+def _usable_box_in(shape):
+    """Inner width/height of a shape's text area, in inches (box minus the
+    text frame's own margins)."""
+    tf = shape.text_frame
+    width = (Emu(shape.width).inches
+             - Emu(tf.margin_left or 0).inches
+             - Emu(tf.margin_right or 0).inches)
+    height = (Emu(shape.height).inches
+              - Emu(tf.margin_top or 0).inches
+              - Emu(tf.margin_bottom or 0).inches)
+    return max(width, 0.05), max(height, 0.05)
+
+
+def _fits(paragraph_texts, size_pt, width_in, height_in, wrap):
+    """Whether the text is estimated to fit the box at this point size."""
+    char_width_in = size_pt / 72.0 * CHAR_WIDTH_RATIO
+    line_height_in = size_pt / 72.0 * LINE_HEIGHT_RATIO
+    if wrap:
+        chars_per_line = max(1, int(width_in / char_width_in))
+        lines = sum(max(1, math.ceil(len(t) / chars_per_line))
+                    for t in paragraph_texts)
+    else:
+        # No wrapping: every paragraph is one line, but the longest one has
+        # to fit the width on its own.
+        lines = len(paragraph_texts)
+        longest = max((len(t) for t in paragraph_texts), default=0)
+        if longest * char_width_in > width_in:
+            return False
+    return lines * line_height_in <= height_in
+
+
+def estimate_fit_font_size(shape, min_pt=None, max_pt=None):
+    """Largest point size at which the shape's text is estimated to fit its
+    box — used to grow text that is swimming in empty space as well as to
+    shrink text that overflows.
+
+    Returns None when the shape has no text to measure. The estimate is
+    geometric (see CHAR_WIDTH_RATIO), not a real text layout: the inspect
+    loop re-renders and re-reviews, which is what confirms the result.
+    """
+    if not shape.has_text_frame:
+        return None
+    texts = [p.text for p in shape.text_frame.paragraphs if p.text]
+    if not texts:
+        return None
+    lo = int(min_pt if min_pt is not None else FONT_PT_RANGE[0])
+    hi = int(max_pt if max_pt is not None else FONT_PT_RANGE[1])
+    lo = max(lo, FONT_PT_RANGE[0])
+    hi = min(hi, FONT_PT_RANGE[1])
+    if hi < lo:
+        return None
+    width_in, height_in = _usable_box_in(shape)
+    width_in *= FIT_SLACK
+    height_in *= FIT_SLACK
+    wrap = shape.text_frame.word_wrap is not False
+    for size in range(hi, lo - 1, -1):
+        if _fits(texts, size, width_in, height_in, wrap):
+            return size
+    return lo
+
+
+def current_font_size_pt(shape):
+    """Largest explicit run size in the shape, or None when the text
+    inherits its size from the layout/master."""
+    if not shape.has_text_frame:
+        return None
+    sizes = [run.font.size.pt
+             for para in shape.text_frame.paragraphs
+             for run in para.runs
+             if run.font.size is not None]
+    return max(sizes) if sizes else None
+
+
+# Growing text is anchored to the deck's own typography: a box holding one
+# short word would otherwise "fit" at 96pt and shout over the whole slide.
+MAX_GROWTH_FACTOR = 1.5
+DEFAULT_GROWTH_CEILING_PT = 44
+
+
+def fit_growth_ceiling(shape):
+    current = current_font_size_pt(shape)
+    if current is None:
+        return DEFAULT_GROWTH_CEILING_PT
+    return max(current, min(FONT_PT_RANGE[1], current * MAX_GROWTH_FACTOR))
+
+
+def _describe_table(table):
+    """Column widths, row heights and cell text — what a planner needs to
+    decide whether a column is too narrow or a row too short for its text."""
+    info = {
+        "rows": len(table.rows),
+        "columns": len(table.columns),
+        "column_widths_in": [_emu_to_in(c.width) for c in table.columns],
+        "row_heights_in": [_emu_to_in(r.height) for r in table.rows],
+    }
+    cells, sizes = [], set()
+    for r_idx, row in enumerate(table.rows):
+        for c_idx, cell in enumerate(row.cells):
+            text = cell.text_frame.text
+            if text:
+                cells.append({"row": r_idx, "column": c_idx,
+                              "text": text[:80] + ("…" if len(text) > 80 else "")})
+            for para in cell.text_frame.paragraphs:
+                for run in para.runs:
+                    if run.font.size is not None:
+                        sizes.add(run.font.size.pt)
+    info["cells"] = cells[:60]
+    if sizes:
+        info["font_sizes_pt"] = sorted(sizes)
+    return info
+
+
+def _describe_chart(chart):
+    """Chart structure relevant to label crowding: how many categories and
+    series compete for space, and which label layers are switched on."""
+    info = {}
+    try:
+        info["chart_type"] = str(chart.chart_type)
+    except Exception:  # some chart types raise on unknown enum values
+        logger.debug("describe_chart_type_unavailable")
+    try:
+        info["series_count"] = len(chart.series)
+        info["categories"] = [str(c)[:40] for c in chart.plots[0].categories][:20]
+    except Exception:
+        logger.debug("describe_chart_data_unavailable")
+    try:
+        info["has_legend"] = chart.has_legend
+        if chart.has_legend:
+            info["legend_position"] = str(chart.legend.position)
+    except Exception:
+        logger.debug("describe_chart_legend_unavailable")
+    try:
+        info["has_data_labels"] = chart.plots[0].has_data_labels
+    except Exception:
+        logger.debug("describe_chart_labels_unavailable")
+    try:
+        if chart.font.size is not None:
+            info["font_size_pt"] = chart.font.size.pt
+    except Exception:
+        logger.debug("describe_chart_font_unavailable")
+    return info
+
+
 def describe_slides(pres, slide_numbers=None):
     """Compact structural description of slides for the repair planner.
-    slide_numbers: 1-based; None describes every slide."""
+    slide_numbers: 1-based; None describes every slide.
+
+    Text lives in more than text frames: tables and charts are described too,
+    so the planner can act on a crowded axis or an over-narrow column instead
+    of only seeing an opaque rectangle."""
     described = []
     for idx, slide in enumerate(pres.slides, start=1):
         if slide_numbers and idx not in slide_numbers:
@@ -68,6 +256,16 @@ def describe_slides(pres, slide_numbers=None):
                 })
                 if sizes:
                     info["font_sizes_pt"] = sizes
+                if shape.text_frame.word_wrap is not None:
+                    info["word_wrap"] = shape.text_frame.word_wrap
+            if getattr(shape, "has_table", False):
+                info["table"] = _describe_table(shape.table)
+            if getattr(shape, "has_chart", False):
+                info["chart"] = _describe_chart(shape.chart)
+            if shape.shape_type is not None and "GROUP" in str(shape.shape_type):
+                # Group members are not individually addressable by the repair
+                # ops; say so rather than describe shapes that cannot be fixed.
+                info["group_members"] = len(shape.shapes)
             shapes.append(info)
         described.append({"slide": idx, "shapes": shapes})
     return described
@@ -92,13 +290,42 @@ object, no markdown fence:
   {{"op": "move_shape", "slide": N, "shape_index": N, "left_in": X, "top_in": Y}},
   {{"op": "resize_shape", "slide": N, "shape_index": N, "width_in": X, "height_in": Y}},
   {{"op": "set_font_size", "slide": N, "shape_index": N, "size_pt": X}},
+  {{"op": "fit_text", "slide": N, "shape_index": N, "min_pt": X, "max_pt": X}},
+  {{"op": "set_autofit", "slide": N, "shape_index": N, "mode": "shrink_text"}},
   {{"op": "set_text", "slide": N, "shape_index": N, "text": "..."}},
   {{"op": "set_word_wrap", "slide": N, "shape_index": N, "wrap": true}},
-  {{"op": "delete_shape", "slide": N, "shape_index": N}}
+  {{"op": "delete_shape", "slide": N, "shape_index": N}},
+  {{"op": "set_column_width", "slide": N, "shape_index": N, "column": N, "width_in": X}},
+  {{"op": "set_row_height", "slide": N, "shape_index": N, "row": N, "height_in": X}},
+  {{"op": "set_cell_text", "slide": N, "shape_index": N, "row": N, "column": N, "text": "..."}},
+  {{"op": "set_chart_legend", "slide": N, "shape_index": N, "show": true, "position": "bottom"}},
+  {{"op": "set_chart_data_labels", "slide": N, "shape_index": N, "show": false}}
 ]}}
 Only these operation types are allowed. Keep every shape fully inside the \
-slide bounds. Prefer minimal changes: resize/move/shrink text before deleting \
-anything. Do not touch shapes that have no reported issue."""
+slide bounds. Prefer minimal changes: resize, move or resize text before \
+deleting anything. Do not touch shapes that have no reported issue.
+
+Size text to the space it has. Text should fill its box comfortably — neither \
+overflowing it nor floating in a mostly empty one — while the slide as a whole \
+keeps its breathing room. Use fit_text (optionally bounded with min_pt/max_pt) \
+to let the server compute the size that fits the box; it grows text that is too \
+small for its container as well as shrinking text that overflows. Reach for \
+set_font_size instead when you want one specific size, e.g. to match a sibling \
+element. Growing text is not an improvement when it crowds neighbouring \
+elements or leaves no margin: prefer consistency with comparable elements on \
+the same slide, and never enlarge text just because there is room.
+
+For text that is not in a text box, use the operation that matches the \
+container. Table columns too narrow for their text: widen the column (and \
+narrow another so the table still fits) or shrink the table font. Table rows \
+clipping their text: raise the row height. Chart axis labels colliding or \
+truncated: shrink the chart font, or widen/heighten the chart. Data labels \
+overlapping their bars or each other: turn them off, or shrink the chart \
+font. A legend covering the plot: move it to "bottom"/"right", or hide it \
+when the categories are already labelled. set_font_size works on a text box, \
+a whole table or a whole chart — shape_index alone picks the container. \
+Members of a group cannot be addressed individually: move, resize or shrink \
+the group as a whole."""
 
 
 def plan_repairs(llm, issues, pres, deck_images, image_slides=None):
@@ -197,12 +424,26 @@ def apply_repairs(pres, operations, allowed_slides=None):
                 if not _in_range(op.get("size_pt"), FONT_PT_RANGE):
                     skipped.append({"op": op, "reason": "font size out of range"})
                     continue
-                if not shape.has_text_frame:
-                    skipped.append({"op": op, "reason": "shape has no text frame"})
+                size = Pt(op["size_pt"])
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        for run in para.runs:
+                            run.font.size = size
+                elif getattr(shape, "has_table", False):
+                    # Shrinking every cell is the usual answer to table text
+                    # that wraps into an unreadable stack.
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            for para in cell.text_frame.paragraphs:
+                                para.font.size = size
+                                for run in para.runs:
+                                    run.font.size = size
+                elif getattr(shape, "has_chart", False):
+                    # One chart-wide font: axis ticks, data labels and legend.
+                    shape.chart.font.size = size
+                else:
+                    skipped.append({"op": op, "reason": "shape has no text"})
                     continue
-                for para in shape.text_frame.paragraphs:
-                    for run in para.runs:
-                        run.font.size = Pt(op["size_pt"])
             elif kind == "set_text":
                 text = op.get("text")
                 if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
@@ -217,6 +458,98 @@ def apply_repairs(pres, operations, allowed_slides=None):
                     skipped.append({"op": op, "reason": "shape has no text frame"})
                     continue
                 shape.text_frame.word_wrap = bool(op.get("wrap", True))
+            elif kind == "fit_text":
+                if not shape.has_text_frame:
+                    skipped.append({"op": op, "reason": "shape has no text frame"})
+                    continue
+                min_pt, max_pt = op.get("min_pt"), op.get("max_pt")
+                for value, label in ((min_pt, "min_pt"), (max_pt, "max_pt")):
+                    if value is not None and not _in_range(value, FONT_PT_RANGE):
+                        skipped.append({"op": op,
+                                        "reason": f"{label} out of range"})
+                        break
+                else:
+                    if max_pt is None:
+                        max_pt = fit_growth_ceiling(shape)
+                    size = estimate_fit_font_size(shape, min_pt, max_pt)
+                    if size is None:
+                        skipped.append({"op": op, "reason": "shape has no text"})
+                        continue
+                    for para in shape.text_frame.paragraphs:
+                        para.font.size = Pt(size)
+                        for run in para.runs:
+                            run.font.size = Pt(size)
+                    op = dict(op, resolved_size_pt=size)
+                    logger.debug("fit_text slide=%s shape_index=%s size_pt=%s",
+                                 slide_no, shape_idx, size)
+                    applied.append(op)
+                continue
+            elif kind == "set_autofit":
+                if not shape.has_text_frame:
+                    skipped.append({"op": op, "reason": "shape has no text frame"})
+                    continue
+                mode = op.get("mode")
+                if mode not in AUTOFIT_MODES:
+                    skipped.append({"op": op, "reason": "bad autofit mode"})
+                    continue
+                shape.text_frame.auto_size = AUTOFIT_MODES[mode]
+            elif kind in ("set_column_width", "set_row_height",
+                          "set_cell_text"):
+                if not getattr(shape, "has_table", False):
+                    skipped.append({"op": op, "reason": "shape is not a table"})
+                    continue
+                table = shape.table
+                if kind == "set_column_width":
+                    col = op.get("column")
+                    if not (isinstance(col, int) and 0 <= col < len(table.columns)):
+                        skipped.append({"op": op, "reason": "bad column index"})
+                        continue
+                    if not _in_range(op.get("width_in"), SIZE_IN_RANGE):
+                        skipped.append({"op": op, "reason": "width out of range"})
+                        continue
+                    table.columns[col].width = Inches(op["width_in"])
+                elif kind == "set_row_height":
+                    row_idx = op.get("row")
+                    if not (isinstance(row_idx, int) and 0 <= row_idx < len(table.rows)):
+                        skipped.append({"op": op, "reason": "bad row index"})
+                        continue
+                    if not _in_range(op.get("height_in"), SIZE_IN_RANGE):
+                        skipped.append({"op": op, "reason": "height out of range"})
+                        continue
+                    table.rows[row_idx].height = Inches(op["height_in"])
+                else:  # set_cell_text
+                    row_idx, col = op.get("row"), op.get("column")
+                    text = op.get("text")
+                    if not (isinstance(row_idx, int) and 0 <= row_idx < len(table.rows)
+                            and isinstance(col, int) and 0 <= col < len(table.columns)):
+                        skipped.append({"op": op, "reason": "bad cell reference"})
+                        continue
+                    if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
+                        skipped.append({"op": op, "reason": "bad text"})
+                        continue
+                    table.cell(row_idx, col).text_frame.text = text
+            elif kind in ("set_chart_legend", "set_chart_data_labels"):
+                if not getattr(shape, "has_chart", False):
+                    skipped.append({"op": op, "reason": "shape is not a chart"})
+                    continue
+                show = op.get("show")
+                if not isinstance(show, bool):
+                    skipped.append({"op": op, "reason": "show must be true/false"})
+                    continue
+                chart = shape.chart
+                if kind == "set_chart_legend":
+                    position = op.get("position")
+                    if position is not None and position not in LEGEND_POSITIONS:
+                        skipped.append({"op": op, "reason": "bad legend position"})
+                        continue
+                    chart.has_legend = show
+                    if show and position is not None:
+                        chart.legend.position = LEGEND_POSITIONS[position]
+                        chart.legend.include_in_layout = False
+                else:  # set_chart_data_labels — the usual cure for labels
+                       # stacked on top of their own bars
+                    for plot in chart.plots:
+                        plot.has_data_labels = show
             elif kind == "delete_shape":
                 shape._element.getparent().remove(shape._element)
             else:
