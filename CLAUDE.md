@@ -110,7 +110,11 @@ Upstream's `manage_image(source_type="base64")` stays as the small-asset fallbac
 (default) scales into the given box and centres, `cover` fills and crops via `Picture.crop_*`, `stretch` distorts, one
 dimension scales proportionally, neither keeps native size clamped to the slide. Default to non-distorting fits — visual
 QA can move, resize and delete a picture but has no operation that un-distorts one. `DIAL_IMAGE_MAX_MB` bounds the
-download.
+download. **`image_url` is `Annotated[str, Field(json_schema_extra={"dial_url": True})]` and must stay that way**: DIAL
+Quick Apps scans each tool's input schema and grants the toolset's per-request key access to the file named by any
+`dial_url` parameter. That key otherwise reaches only its own bucket and `appdata/{this-deployment}`, so every image
+another deployment generated 403s — no `DIAL_AUTH_MODE` value fixes it. Any future parameter taking a DIAL file URL
+needs the same annotation (`tests/test_image_tools.py` asserts the flag survives to `tools/list`).
 
 **DIAL file I/O (`dial_client.py`).** `resolve_dial_auth_headers` implements `DIAL_AUTH_MODE`: `auto` prefers credentials
 pulled off the incoming MCP request (so exports land in the end user's own bucket — only works when the server is deployed

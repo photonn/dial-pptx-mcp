@@ -186,6 +186,27 @@ class TestPlacement(ImageToolTestCase):
         self.assertEqual(result["size_bytes"], len(png_bytes(800, 400)))
 
 
+class TestToolSchema(unittest.TestCase):
+    """The DIAL file URL parameter must reach tools/list flagged: DIAL Quick
+    Apps grants the toolset's per-request key access to a file only when the
+    parameter carrying it is marked "dial_url". Without the flag the key sees
+    its own bucket and appdata only, and every image another deployment
+    generated comes back 403."""
+
+    def test_image_url_parameter_is_flagged_dial_url(self):
+        import asyncio
+        from mcp.server.fastmcp import FastMCP
+
+        app = FastMCP("test")
+        register_image_tools(app, PresentationStore(ttl_seconds=60,
+                                                    max_items=1))
+        tools = {t.name: t for t in asyncio.run(app.list_tools())}
+        schema = tools["add_image_from_dial_url"].inputSchema
+        self.assertIs(schema["properties"]["image_url"].get("dial_url"), True)
+        self.assertEqual(schema["properties"]["image_url"]["type"], "string")
+        self.assertIn("image_url", schema["required"])
+
+
 class TestUrlAcceptance(ImageToolTestCase):
     """No stubbing of DialFileClient here: a web URL must be refused before
     any HTTP request is made, and reported as an error dict, not raised."""

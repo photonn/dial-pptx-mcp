@@ -132,9 +132,15 @@ so the image is not distorted; for a text-left/image-right slide use roughly
 half the slide width for each.
 ```
 
-**Whose storage the server can read.** DIAL file storage is per-user, and inside `appdata` it is also per-deployment: credentials reach their own bucket and their own appdata folder, nothing else. An image an *image deployment* generated lands in `{user-bucket}/appdata/{that-deployment}/...`, which this server can read only when DIAL forwards the end user's own credentials to it — i.e. when the server is deployed under the DIAL host (`DIAL_AUTH_MODE=auto` then reads as the user). With the server falling back to its own `DIAL_API_KEY`, DIAL Core answers `403` and the tool reports which identity it used, which bucket that identity owns, and which bucket the file is in.
+**How the server is allowed to read the file.** DIAL isolates deployments from each other: when the agent calls this toolset, DIAL Core mints a per-request key scoped to it, and that key can read exactly two places — its own bucket and `Users/{user}/appdata/{this-deployment}/`. A generated image lives in the *image* deployment's appdata (`Users/{user}/appdata/{image-deployment}/…`), which is neither. Conversation attachments are not auto-shared onto a toolset key either.
 
-Call `get_dial_storage_info` to see that identity directly — it returns the bucket and appdata path this server actually has on the current request. If the bucket it reports is not the bucket in your image URL, no URL fix will help: either deploy under the DIAL host, have the orchestrator store the image where the server's credentials can reach it, or fall back to `manage_image(source_type="base64")` for that one image.
+The bridge is a schema flag. Before each MCP call, Quick Apps scans the tool's input schema and, for every parameter marked `"dial_url": true`, asks Core to grant that specific file to the toolset's per-request key. `add_image_from_dial_url` declares it on `image_url`:
+
+```json
+"image_url": { "dial_url": true, "title": "Image Url", "type": "string" }
+```
+
+Two consequences worth knowing. **Pass the URL exactly as received, in that parameter** — the grant covers the value Quick Apps saw, so a URL reassembled by hand, or carried in some other argument, is not granted and still 403s. And this is why the flag matters more than `DIAL_AUTH_MODE`: without it no credential setting helps, because no identity available to this server owns that file. `get_dial_storage_info` reports the identity and bucket this server actually has, for when a read is still refused.
 
 **What counts as an image URL.** A DIAL file reference: the `files/{bucket}/{path}` URL an upload returns, or the full https URL of that file on this DIAL installation — the `.../api/files/{bucket}/{path}` link an image deployment hands back is accepted as-is, as is the Core API's `/v1/files/...` form. Arbitrary web URLs are refused: this server is not a web fetcher, and an agent that finds a picture online must store it in DIAL file storage before inserting it. If your file links carry a different hostname than `DIAL_CORE_URL` (public chat host vs. in-cluster service), list it in `DIAL_PUBLIC_URL`.
 

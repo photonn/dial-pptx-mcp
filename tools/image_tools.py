@@ -14,10 +14,11 @@ never has to report distortion it cannot repair.
 """
 import io
 import os
-from typing import Dict, Optional
+from typing import Annotated, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import Field
 from pptx.util import Emu, Inches
 
 from logging_utils import get_logger
@@ -30,6 +31,14 @@ UNKNOWN_ID = (
     "by create_presentation, create_presentation_from_template, or "
     "open_presentation"
 )
+
+# DIAL Quick Apps scans each tool's input schema before the call and, for any
+# parameter flagged "dial_url", asks DIAL Core to grant that file to this
+# toolset's per-request key. Without the flag the key can read only its own
+# bucket and its own appdata folder, so a file another deployment produced —
+# every generated image — comes back 403 no matter how the server
+# authenticates. The flag is what bridges the two deployments.
+DialFileUrl = Annotated[str, Field(json_schema_extra={"dial_url": True})]
 
 FIT_MODES = ("contain", "cover", "stretch")
 DEFAULT_MAX_MB = 20.0
@@ -111,7 +120,7 @@ def register_image_tools(app: FastMCP, presentations):
     def add_image_from_dial_url(
         presentation_id: str,
         slide_index: int,
-        image_url: str,
+        image_url: DialFileUrl,
         left: float = 1.0,
         top: float = 1.0,
         width: Optional[float] = None,

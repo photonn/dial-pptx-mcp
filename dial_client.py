@@ -264,13 +264,14 @@ class DialFileClient:
                 f"to it."
             )
         parts.append(
-            "Fix it at the source: have the orchestrator copy the image into "
-            "storage these credentials can reach (its own file space, or the "
-            "user's bucket root) and pass that URL, or deploy this MCP server "
-            "under the DIAL host so DIAL Quick Apps forwards the end user's "
-            "credentials (DIAL_AUTH_MODE=auto then reads as the file's "
-            "owner). For a small image, manage_image(source_type=\"base64\") "
-            "sidesteps DIAL storage entirely."
+            "DIAL Quick Apps grants this server access to a specific file "
+            "when the tool parameter carrying it is flagged 'dial_url' in "
+            "the tool schema — pass the file URL exactly as you received it, "
+            "in that parameter, rather than a URL assembled by hand or "
+            "fetched some other way. If it still fails, the orchestrator can "
+            "copy the file into storage these credentials reach, or "
+            "manage_image(source_type=\"base64\") sidesteps DIAL storage "
+            "for a small image."
         )
         return f"DIAL Core refused this file ({status}). " + " ".join(parts)
 
