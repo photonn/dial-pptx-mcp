@@ -155,6 +155,38 @@ class TestTableAndChartRepairs(unittest.TestCase):
                     "row": 0, "column": 1, "text": "Q1"})
         self.assertEqual(self.table.cell(0, 1).text, "Q1")
 
+    def test_set_axis_title_names_axes_by_role(self):
+        result = self.apply(
+            {"op": "set_axis_title", "slide": 1, "shape_index": 1,
+             "axis": "category", "text": "Dinosaur Genus"},
+            {"op": "set_axis_title", "slide": 1, "shape_index": 1,
+             "axis": "value", "text": "Weight (Metric Tons)"})
+        self.assertEqual(len(result["applied"]), 2, result["skipped"])
+        self.assertEqual(self.chart.category_axis.axis_title.text_frame.text,
+                         "Dinosaur Genus")
+        self.assertEqual(self.chart.value_axis.axis_title.text_frame.text,
+                         "Weight (Metric Tons)")
+
+    def test_set_axis_title_rejects_a_bad_axis_or_target(self):
+        result = self.apply(
+            {"op": "set_axis_title", "slide": 1, "shape_index": 1,
+             "axis": "horizontal", "text": "x"},
+            {"op": "set_axis_title", "slide": 1, "shape_index": 1,
+             "axis": "value", "text": 42},
+            {"op": "set_axis_title", "slide": 1, "shape_index": 0,
+             "axis": "value", "text": "on a table"})
+        self.assertEqual(result["applied"], [])
+        self.assertEqual([e["reason"] for e in result["skipped"]],
+                         ["axis must be category or value", "bad text",
+                          "shape is not a chart"])
+
+    def test_describe_reports_existing_axis_titles(self):
+        self.chart.category_axis.has_title = True
+        self.chart.category_axis.axis_title.text_frame.text = "Genus"
+        described = visual_fix.describe_slides(self.pres)[0]["shapes"][1]
+        self.assertEqual(described["chart"]["category_axis_title"], "Genus")
+        self.assertNotIn("value_axis_title", described["chart"])
+
     def test_font_size_applies_to_table_and_chart(self):
         result = self.apply(
             {"op": "set_font_size", "slide": 1, "shape_index": 0, "size_pt": 10},
@@ -380,6 +412,39 @@ class TestInspectAndRepairLoop(unittest.TestCase):
             outcome = visual_qa.inspect_and_repair(make_deck())
         return outcome, calls
 
+    def test_zero_applied_round_reports_why_and_says_not_to_retry(self):
+        """The 0-applied/N-skipped result an operator sees has to name the
+        reason: repairs ran, the plan was rejected."""
+        verdicts = [{"passed": False,
+                     "issues": [{"slide": 1, "description": "layout thing"}]}]
+        # shape_index 99 exists on no slide: the validator rejects both.
+        plans = [[{"op": "move_shape", "slide": 1, "shape_index": 99,
+                   "left_in": 1.0, "top_in": 1.0},
+                  {"op": "resize_shape", "slide": 1, "shape_index": 99,
+                   "width_in": 2.0}]]
+        outcome, calls = self._run(verdicts, plans)
+        self.assertFalse(outcome["passed"])
+        round_one = outcome["repair_rounds"][0]
+        self.assertEqual(round_one["operations_applied"], 0)
+        self.assertEqual(round_one["skipped_reasons"], {"bad shape_index": 2})
+        self.assertIn("bad shape_index x2", outcome["repair_note"])
+        self.assertIn("will not help", outcome["repair_note"])
+        # Stopped instead of burning the rest of the budget on a plan that
+        # cannot land.
+        self.assertEqual(calls["review"], 1)
+
+    def test_successful_round_carries_no_skip_noise(self):
+        verdicts = [
+            {"passed": False, "issues": [{"slide": 1, "description": "x"}]},
+            {"passed": True, "issues": []},
+        ]
+        plans = [[{"op": "move_shape", "slide": 1, "shape_index": 0,
+                   "left_in": 1.0, "top_in": 1.0}]]
+        outcome, _ = self._run(verdicts, plans)
+        self.assertTrue(outcome["passed"])
+        self.assertNotIn("skipped_reasons", outcome["repair_rounds"][0])
+        self.assertNotIn("repair_note", outcome)
+
     def test_pass_first_time(self):
         outcome, calls = self._run([{"passed": True, "issues": []}], [[]])
         self.assertTrue(outcome["passed"])
@@ -419,6 +484,22 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         outcome, calls = self._run([failing], [[]])  # planner returns nothing
         self.assertFalse(outcome["passed"])
         self.assertEqual(calls["review"], 1)  # no progress -> stop immediately
+
+
+class TestSkipReasonSummary(unittest.TestCase):
+    """A round that applies nothing has to explain itself: the counts are
+    what tell an operator the plan was rejected, not that repair is off."""
+
+    def test_counts_reasons_and_drops_the_detail(self):
+        summary = visual_fix.skip_reason_summary([
+            {"op": {}, "reason": "bad shape_index"},
+            {"op": {}, "reason": "bad shape_index"},
+            {"op": {}, "reason": "apply failed: something specific"},
+        ])
+        self.assertEqual(summary, {"bad shape_index": 2, "apply failed": 1})
+
+    def test_empty_plan_summarizes_to_nothing(self):
+        self.assertEqual(visual_fix.skip_reason_summary([]), {})
 
 
 if __name__ == "__main__":

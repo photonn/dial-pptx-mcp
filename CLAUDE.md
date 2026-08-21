@@ -74,7 +74,7 @@ LLM is configured, `register_visual_tools` exposes `visual_inspect_slides` (read
 slide it just built, as often as it likes. Pipeline: render via LibreOffice → PDF → PNG, vision-LLM review, then
 `visual_fix.plan_repairs` asks the model for a plan of **whitelisted, validated** operations
 (move/resize/font-size/fit-text/autofit/set-text/word-wrap/delete, plus table column-width/row-height/cell-text and
-chart legend/data-label toggles) applied with python-pptx, re-render, repeat up to
+chart legend/data-label toggles and axis titles) applied with python-pptx, re-render, repeat up to
 `VISUAL_QA_MAX_ITERATIONS`. Keep repairs whitelist-driven — never execute model-supplied code or widen the operation set
 without validation.
 
@@ -82,7 +82,9 @@ Text in a deck is not only in text frames, and both halves of the loop must keep
 asks explicitly about chart axis/data labels, table cells and diagram/SmartArt node labels, and `describe_slides`
 reports table geometry and chart structure so the planner can address them. A new "text container" needs work in both
 places plus an operation in `apply_repairs` — a reported issue that no whitelisted op can fix just burns iterations
-until the budget runs out.
+until the budget runs out. When a round applies nothing the loop stops immediately and reports `skipped_reasons` plus
+a `repair_note`: `bad shape_index` almost always means the target lives on the layout or master (slide numbers,
+footers), which `slide.shapes` does not expose and no operation can reach.
 
 `fit_text` computes its own size (`estimate_fit_font_size`) instead of taking one from the model, and grows as well as
 shrinks. The geometric estimate (`CHAR_WIDTH_RATIO`, `LINE_HEIGHT_RATIO`, `FIT_SLACK`) is deliberately crude — the

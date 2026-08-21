@@ -443,8 +443,10 @@ def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
         legend_position: Position of legend ('right', 'top', 'bottom', 'left')
         has_data_labels: Whether to show data labels
         title: Chart title
-        x_axis_title: X-axis title
-        y_axis_title: Y-axis title
+        x_axis_title: Title for the CATEGORY axis (horizontal on column/
+            line charts, vertical on bar charts — see the mapping below)
+        y_axis_title: Title for the VALUE axis (vertical on column/line
+            charts, horizontal on bar charts)
         color_scheme: Color scheme to apply
     """
     try:

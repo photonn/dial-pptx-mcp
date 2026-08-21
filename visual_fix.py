@@ -22,6 +22,7 @@ Whitelisted operations (anything else in a plan is skipped and reported):
 - set_cell_text    {slide, shape_index, row, column, text}
 - set_chart_legend {slide, shape_index, show, position?}
 - set_chart_data_labels {slide, shape_index, show}
+- set_axis_title   {slide, shape_index, axis: category|value, text}
 
 fit_text sizes text to the space it actually has — growing text that leaves
 its box mostly empty as readily as shrinking text that overflows — with
@@ -219,6 +220,14 @@ def _describe_chart(chart):
             info["font_size_pt"] = chart.font.size.pt
     except Exception:
         logger.debug("describe_chart_font_unavailable")
+    for name in ("category_axis", "value_axis"):
+        try:
+            axis = getattr(chart, name)
+            # Reading axis_title materializes it, so ask has_title first.
+            if axis.has_title:
+                info[f"{name}_title"] = axis.axis_title.text_frame.text[:60]
+        except Exception:  # pie/doughnut have no such axis
+            logger.debug("describe_chart_axis_unavailable axis=%s", name)
     return info
 
 
@@ -299,7 +308,8 @@ object, no markdown fence:
   {{"op": "set_row_height", "slide": N, "shape_index": N, "row": N, "height_in": X}},
   {{"op": "set_cell_text", "slide": N, "shape_index": N, "row": N, "column": N, "text": "..."}},
   {{"op": "set_chart_legend", "slide": N, "shape_index": N, "show": true, "position": "bottom"}},
-  {{"op": "set_chart_data_labels", "slide": N, "shape_index": N, "show": false}}
+  {{"op": "set_chart_data_labels", "slide": N, "shape_index": N, "show": false}},
+  {{"op": "set_axis_title", "slide": N, "shape_index": N, "axis": "category", "text": "..."}}
 ]}}
 Only these operation types are allowed. Keep every shape fully inside the \
 slide bounds. Prefer minimal changes: resize, move or resize text before \
@@ -325,7 +335,14 @@ font. A legend covering the plot: move it to "bottom"/"right", or hide it \
 when the categories are already labelled. set_font_size works on a text box, \
 a whole table or a whole chart — shape_index alone picks the container. \
 Members of a group cannot be addressed individually: move, resize or shrink \
-the group as a whole."""
+the group as a whole.
+
+Axis titles are named by role, not by screen position: "category" is the axis \
+the categories sit on and "value" is the axis the numbers sit on. On a bar \
+chart the category axis runs vertically and the value axis horizontally; on a \
+column or line chart it is the other way round. Read the current titles in the \
+structure above (category_axis_title / value_axis_title) and the image before \
+deciding a title belongs on the other axis."""
 
 
 def plan_repairs(llm, issues, pres, deck_images, image_slides=None):
@@ -367,6 +384,18 @@ def plan_repairs(llm, issues, pres, deck_images, image_slides=None):
 
 def _in_range(v, lo_hi):
     return isinstance(v, (int, float)) and lo_hi[0] <= v <= lo_hi[1]
+
+
+def skip_reason_summary(skipped):
+    """Count the distinct reasons a plan's operations were rejected, e.g.
+    {"bad shape_index": 2}. Reported to the caller so a round that applied
+    nothing explains itself without a trip to the server logs; the parameter
+    detail after ':' is dropped to keep it a small, stable summary."""
+    counts = {}
+    for entry in skipped:
+        reason = str(entry.get("reason", "unknown")).split(":")[0]
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
 
 
 def apply_repairs(pres, operations, allowed_slides=None):
@@ -550,6 +579,22 @@ def apply_repairs(pres, operations, allowed_slides=None):
                        # stacked on top of their own bars
                     for plot in chart.plots:
                         plot.has_data_labels = show
+            elif kind == "set_axis_title":
+                if not getattr(shape, "has_chart", False):
+                    skipped.append({"op": op, "reason": "shape is not a chart"})
+                    continue
+                which = op.get("axis")
+                text = op.get("text")
+                if which not in ("category", "value"):
+                    skipped.append({"op": op,
+                                    "reason": "axis must be category or value"})
+                    continue
+                if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
+                    skipped.append({"op": op, "reason": "bad text"})
+                    continue
+                axis = getattr(shape.chart, f"{which}_axis")
+                axis.has_title = True
+                axis.axis_title.text_frame.text = text
             elif kind == "delete_shape":
                 shape._element.getparent().remove(shape._element)
             else:

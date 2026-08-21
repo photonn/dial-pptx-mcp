@@ -545,12 +545,20 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         plan = visual_fix.plan_repairs(llm, issues, pres, deck_images,
                                        image_slides)
         result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
-        repair_rounds.append({
+        round_report = {
             "iteration": iteration,
             "issues_found": len(issues),
             "operations_applied": len(result["applied"]),
             "operations_skipped": len(result["skipped"]),
-        })
+        }
+        if result["skipped"]:
+            # Why nothing changed matters more than that nothing changed:
+            # "bad shape_index" means the fix targets something the repair
+            # engine cannot reach (a layout/master placeholder, say), which
+            # no amount of re-running will improve.
+            round_report["skipped_reasons"] = visual_fix.skip_reason_summary(
+                result["skipped"])
+        repair_rounds.append(round_report)
         if not result["applied"]:
             logger.warning("qa_loop_stop reason=no_repair_progress iteration=%d "
                            "operations_planned=%d operations_skipped=%d",
@@ -563,6 +571,20 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
            "iterations": len(repair_rounds) + 1,
            "repair_rounds": repair_rounds,
            "issues": remaining}
+    if repair_rounds and not repair_rounds[-1]["operations_applied"]:
+        # Tell the agent what a zero-applied round means, so it stops the
+        # deck rather than re-running an identical call.
+        out["repair_note"] = (
+            "The last round changed nothing: every planned operation was "
+            "rejected (" + ", ".join(
+                f"{reason} x{count}" for reason, count
+                in repair_rounds[-1].get("skipped_reasons", {}).items())
+            + "). Repairs are working; these issues are just outside what "
+              "they can reach — 'bad shape_index' usually means the target "
+              "belongs to the slide layout or master rather than the slide. "
+              "Fix the content yourself with the editing tools, or report "
+              "the issue to the user. Repeating this call will not help."
+        )
     logger.warning("qa_loop_failed iterations=%d repair_rounds=%d "
                    "unresolved_issues=%d duration_ms=%d",
                    out["iterations"], len(repair_rounds), len(remaining),

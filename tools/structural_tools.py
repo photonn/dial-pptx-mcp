@@ -314,7 +314,17 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
         color_scheme: Optional[str] = None,
         presentation_id: Optional[str] = None
     ) -> Dict:
-        """Add a chart to a slide with comprehensive formatting options."""
+        """Add a chart to a slide with comprehensive formatting options.
+
+        x_axis_title labels the CATEGORY axis and y_axis_title labels the
+        VALUE axis, whatever the chart's orientation — the names are not
+        screen directions. On column, line and area charts the category axis
+        is the horizontal one, so x/y read as expected. On a BAR chart the
+        bars run sideways: the category axis is VERTICAL and the value axis
+        HORIZONTAL, so x_axis_title appears on the vertical axis. Naming a
+        bar chart's axes by where they look on screen is the usual way these
+        two end up swapped.
+        """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:
