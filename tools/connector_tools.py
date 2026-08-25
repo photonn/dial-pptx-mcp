@@ -69,7 +69,8 @@ def register_connector_tools(app, presentations, get_current_presentation_id, va
             connector_map = {
                 'straight': MSO_CONNECTOR.STRAIGHT,
                 'elbow': MSO_CONNECTOR.ELBOW,
-                'curved': MSO_CONNECTOR.CURVED
+                'curved': MSO_CONNECTOR.CURVE,
+                'curve': MSO_CONNECTOR.CURVE,
             }
             
             if connector_type.lower() not in connector_map:
