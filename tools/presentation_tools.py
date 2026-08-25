@@ -81,6 +81,26 @@ def _visual_qa_gate(presentations, pres_id):
     return refusal
 
 
+def _structure_summary(pres, blob):
+    """Cheap structural check folded into every export.
+
+    Export is the last moment anything can be caught, and the check needs no
+    renderer and no model call, so it runs unconditionally — but it never
+    blocks: refusing to deliver a finished deck over a warning costs the user
+    more than the warning does. A failure of the checker itself is reported as
+    "unavailable" rather than raised, for the same reason.
+    """
+    try:
+        import deck_validation
+        report = deck_validation.validate_presentation(pres, blob)
+        return {"validated": True,
+                "errors": report["counts"]["error"],
+                "warnings": report["counts"]["warning"]}
+    except Exception as e:
+        logger.warning("export_structure_check_failed error=%s", e)
+        return {"validated": False, "note": "structural check unavailable"}
+
+
 def _visual_qa_status(presentations, pres_id):
     """Advisory QA state of the deck being exported, for the agent's benefit.
 
@@ -436,8 +456,10 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             import io
             buf = io.BytesIO()
             pres.save(buf)
+            blob = buf.getvalue()
+            structure = _structure_summary(pres, blob)
             client = DialFileClient()
-            file_url = client.upload(buf.getvalue(), filename)
+            file_url = client.upload(blob, filename)
             qa_status = _visual_qa_status(presentations, presentation_id)
             logger.info("export_ok presentation_id=%s filename=%s slides=%d "
                         "bytes=%d visual_qa=%s", short_id(presentation_id),
@@ -450,7 +472,15 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                 "mime_type": PPTX_MIME,
                 "size_bytes": buf.getbuffer().nbytes,
                 "visual_qa": qa_status,
+                "structure": structure,
             }
+            if structure.get("errors"):
+                result["structure_note"] = (
+                    f"The exported deck has {structure['errors']} structural "
+                    "error(s) that may stop it opening in PowerPoint. The "
+                    "file was uploaded regardless; call "
+                    "validate_presentation for the details and fixes."
+                )
             if qa_status == "unverified":
                 result["visual_qa_note"] = (
                     "This deck was never visually inspected, or was edited "

@@ -31,6 +31,7 @@ from pathlib import Path
 
 import httpx
 
+import fonts
 from logging_utils import get_logger, flatten
 
 logger = get_logger("visual_qa")
@@ -461,7 +462,8 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
     ref_images = _render_deck(reference_pres, _slide_cap()) \
         if reference_pres is not None else []
 
-    prompt = review_prompt(bool(ref_images), focus, slides)
+    prompt = review_prompt(bool(ref_images), focus, slides,
+                           fonts.unreliable_fonts_in(pres))
     if ref_images:
         prompt += (
             f"\nImage order: images 1-{len(ref_images)} are the reference "
@@ -502,6 +504,9 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10"))
     max_iterations = max(1, max_iterations)
 
+    # Constant for the whole loop: repairs never change which fonts the deck
+    # names, and re-scanning per round would only cost time.
+    risky_fonts = fonts.unreliable_fonts_in(pres)
     repair_rounds = []
     verdict = {}
     loop_started = time.monotonic()
@@ -514,7 +519,8 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = slides or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images, review_prompt(False, focus, slides))
+        verdict = llm.review(deck_images,
+                             review_prompt(False, focus, slides, risky_fonts))
         verdict["slides_reviewed"] = slides or len(deck_images)
         issues = [i for i in verdict.get("issues", [])
                   if not slides or i.get("slide") in slides]
@@ -596,7 +602,7 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
 
 
 def review_prompt(has_reference: bool, focus: str = None,
-                  slides: list = None) -> str:
+                  slides: list = None, risky_fonts=None) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
@@ -611,6 +617,7 @@ def review_prompt(has_reference: bool, focus: str = None,
             "every issue with the slide number given here, not the image "
             "position, and judge each slide on its own merits."
         )
+    prompt += fonts.qa_font_caveat(risky_fonts)
     if focus:
         prompt += f"\nAdditional focus requested by the caller: {focus}"
     return prompt
