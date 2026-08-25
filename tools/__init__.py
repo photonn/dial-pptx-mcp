@@ -17,6 +17,8 @@ from .visual_tools import register_visual_tools
 from .image_tools import register_image_tools
 from .slide_tools import register_slide_tools
 from .validation_tools import register_validation_tools
+from .guidance_tools import register_guidance_tools
+from .preview_tools import register_preview_tools
 
 __all__ = [
     "register_visual_tools",
@@ -32,5 +34,7 @@ __all__ = [
     "register_transition_tools",
     "register_image_tools",
     "register_slide_tools",
-    "register_validation_tools"
+    "register_validation_tools",
+    "register_guidance_tools",
+    "register_preview_tools"
 ]
