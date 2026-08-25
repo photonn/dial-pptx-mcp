@@ -54,6 +54,61 @@ def _soffice_binary():
     return path
 
 
+def convert_with_soffice(data: bytes, source_suffix: str, target: str,
+                         timeout: float = 180.0) -> bytes:
+    """Run one headless LibreOffice conversion and return the output bytes.
+
+    `source_suffix` is the input file's extension (".pptx", ".ppt"); `target`
+    is LibreOffice's --convert-to argument ("pdf", "pptx"). Every caller here
+    goes through this: the isolated user profile is what stops concurrent
+    conversions fighting over the shared profile lock, and getting that wrong
+    fails intermittently under load rather than in testing.
+    """
+    with tempfile.TemporaryDirectory(prefix="pptx-convert-") as tmp:
+        tmp = Path(tmp)
+        src = tmp / f"deck{source_suffix}"
+        src.write_bytes(data)
+        profile = tmp / "lo-profile"
+        cmd = [
+            _soffice_binary(), "--headless", "--norestore",
+            f"-env:UserInstallation=file://{profile}",
+            "--convert-to", target, "--outdir", str(tmp), str(src),
+        ]
+        started = time.monotonic()
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        # --convert-to may take a filter suffix ("pdf:impress_pdf_Export");
+        # the file it writes is named after the bare extension.
+        out = tmp / f"deck.{target.split(':', 1)[0]}"
+        if proc.returncode != 0 or not out.exists():
+            logger.error("convert_failed stage=libreoffice target=%s "
+                         "returncode=%d bytes=%d stderr=%s", target,
+                         proc.returncode, len(data),
+                         flatten(proc.stderr.decode(errors="replace")[-300:]))
+            raise VisualQAError(
+                f"LibreOffice failed to convert the presentation to {target}: "
+                + proc.stderr.decode(errors="replace")[-500:]
+            )
+        result = out.read_bytes()
+        logger.debug("convert_ok target=%s in_bytes=%d out_bytes=%d "
+                     "duration_ms=%d", target, len(data), len(result),
+                     int((time.monotonic() - started) * 1000))
+        return result
+
+
+def render_pptx_bytes_to_pdf(pptx_data: bytes) -> bytes:
+    """Convert presentation bytes to PDF bytes."""
+    return convert_with_soffice(pptx_data, ".pptx", "pdf")
+
+
+def convert_legacy_ppt(data: bytes) -> bytes:
+    """Convert a binary PowerPoint 97-2003 (.ppt) file to .pptx bytes.
+
+    python-pptx reads only OOXML, so a legacy deck has to be converted before
+    anything else in this server can touch it.
+    """
+    return convert_with_soffice(data, ".ppt", "pptx")
+
+
 def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
                               max_slides: int = None,
                               slides: list = None) -> list:
@@ -66,49 +121,28 @@ def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
     """
     import pymupdf
 
-    with tempfile.TemporaryDirectory(prefix="pptx-visual-qa-") as tmp:
-        tmp = Path(tmp)
-        src = tmp / "deck.pptx"
-        src.write_bytes(pptx_data)
-        # Isolated LibreOffice profile so concurrent renders don't fight
-        # over the shared user profile lock.
-        profile = tmp / "lo-profile"
-        cmd = [
-            _soffice_binary(), "--headless", "--norestore",
-            f"-env:UserInstallation=file://{profile}",
-            "--convert-to", "pdf", "--outdir", str(tmp), str(src),
-        ]
-        started = time.monotonic()
-        proc = subprocess.run(cmd, capture_output=True, timeout=180)
-        pdf = tmp / "deck.pdf"
-        if proc.returncode != 0 or not pdf.exists():
-            logger.error("render_failed stage=libreoffice returncode=%d bytes=%d "
-                         "stderr=%s", proc.returncode, len(pptx_data),
-                         flatten(proc.stderr.decode(errors="replace")[-300:]))
-            raise VisualQAError(
-                "LibreOffice failed to render the presentation: "
-                + proc.stderr.decode(errors="replace")[-500:]
-            )
-        images = []
-        with pymupdf.open(pdf) as doc:
-            page_count = doc.page_count
-            if slides is None:
-                wanted = list(range(1, page_count + 1))
-            else:
-                wanted = [n for n in slides if 1 <= n <= page_count]
-            if max_slides is not None:
-                wanted = wanted[:max_slides]
-            for number in wanted:
-                pix = doc[number - 1].get_pixmap(dpi=dpi)
-                images.append(pix.tobytes("png"))
-        if slides is None and page_count > len(images):
-            logger.warning("render_truncated rendered=%d slides=%d cap=%s "
-                           "hint=raise_VISION_LLM_MAX_SLIDES",
-                           len(images), page_count, max_slides)
-        logger.debug("render_ok slides=%d of=%d dpi=%d duration_ms=%d",
-                     len(images), page_count, dpi,
-                     int((time.monotonic() - started) * 1000))
-        return images
+    started = time.monotonic()
+    images = []
+    with pymupdf.open(stream=render_pptx_bytes_to_pdf(pptx_data),
+                      filetype="pdf") as doc:
+        page_count = doc.page_count
+        if slides is None:
+            wanted = list(range(1, page_count + 1))
+        else:
+            wanted = [n for n in slides if 1 <= n <= page_count]
+        if max_slides is not None:
+            wanted = wanted[:max_slides]
+        for number in wanted:
+            pix = doc[number - 1].get_pixmap(dpi=dpi)
+            images.append(pix.tobytes("png"))
+    if slides is None and page_count > len(images):
+        logger.warning("render_truncated rendered=%d slides=%d cap=%s "
+                       "hint=raise_VISION_LLM_MAX_SLIDES",
+                       len(images), page_count, max_slides)
+    logger.debug("render_ok slides=%d of=%d dpi=%d duration_ms=%d",
+                 len(images), page_count, dpi,
+                 int((time.monotonic() - started) * 1000))
+    return images
 
 
 def normalize_slides(pres, slides):
