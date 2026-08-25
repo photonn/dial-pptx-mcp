@@ -121,6 +121,24 @@ class TestPartialTransform(unittest.TestCase):
         report = deck_validation.validate_presentation(pres)
         self.assertIn("partial_transform", codes(report, "warning"))
 
+    def test_the_message_names_what_powerpoint_substitutes(self):
+        # The two halves fail differently, and so does the fix for each.
+        for drop, said, fix_tool in (("off", "top-left corner", "move_shape"),
+                                     ("ext", "no size", "resize_shape")):
+            with self.subTest(drop=drop):
+                pres, _ = self.broken_deck(drop=drop)
+                report = deck_validation.validate_presentation(pres)
+                problem = next(p for p in report["problems"]
+                               if p["code"] == "partial_transform")
+                self.assertIn(said, problem["message"])
+                self.assertIn(fix_tool, problem["fix"])
+
+    def test_a_missing_extent_does_not_claim_the_corner(self):
+        pres, _ = self.broken_deck(drop="ext")
+        problem = next(p for p in deck_validation.validate_presentation(pres)
+                       ["problems"] if p["code"] == "partial_transform")
+        self.assertNotIn("top-left corner", problem["message"])
+
     def test_the_problem_names_the_shape_and_a_fix(self):
         pres, _ = self.broken_deck(drop="off")
         report = deck_validation.validate_presentation(pres)

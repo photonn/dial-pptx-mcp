@@ -312,20 +312,32 @@ def _check_transform(slide_index, shape_index, shape, report):
         xfrm = shape._element.find(qn("p:xfrm"))
     if xfrm is None:
         return
-    missing = [part for part in ("off", "ext")
-               if xfrm.find(qn("a:" + part)) is None]
+    missing = tuple(part for part in ("off", "ext")
+                    if xfrm.find(qn("a:" + part)) is None)
     if not missing:
         return
-    lost = ("position" if missing == ["off"]
-            else "size" if missing == ["ext"] else "position and size")
+    # What PowerPoint substitutes differs by half, and the fix differs with it.
+    lost, consequence, fix = {
+        ("off",): ("position",
+                   "draw it at the top-left corner of the slide",
+                   "Give it an explicit position with visual_repair_slides "
+                   "(move_shape writes position and size together)."),
+        ("ext",): ("size",
+                   "draw it with no size, so it disappears",
+                   "Give it an explicit size with visual_repair_slides "
+                   "(resize_shape writes position and size together)."),
+        ("off", "ext"): ("position or size",
+                         "draw it at the top-left corner of the slide with "
+                         "no size",
+                         "Give it an explicit position and size with "
+                         "visual_repair_slides (move_shape writes both)."),
+    }[missing]
     report.add(
         WARNING, "partial_transform",
         f"Slide {slide_index}, shape {shape_index} ('{shape.name}') has a "
         f"transform with no {lost}. It renders in place in LibreOffice, which "
-        f"falls back to the layout, but PowerPoint will draw it at the "
-        f"top-left corner of the slide.",
-        "Give it an explicit position and size with visual_repair_slides "
-        "(move_shape writes both).",
+        f"falls back to the layout, but PowerPoint will {consequence}.",
+        fix,
         slide=slide_index, shape=shape_index)
 
 
