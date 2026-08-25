@@ -9,8 +9,17 @@ from .content_utils import *
 from .design_utils import *
 from .validation_utils import *
 from .slide_utils import *
+from .combo_chart_utils import *
 
 __all__ = [
+    # Combo chart utilities
+    "COMBO_SERIES_TYPES",
+    "apply_combo_layout",
+    "set_series_color",
+    "set_series_data_labels",
+    "add_series_trendline",
+    "TRENDLINE_TYPES",
+
     # Slide structure utilities
     "delete_slide",
     "move_slide",
