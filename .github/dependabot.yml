@@ -19,6 +19,12 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    ignore:
+      # mcp 2.x removed mcp.server.fastmcp, which this whole server is built on,
+      # and the _tool_manager internals state.serialize_per_presentation patches.
+      # Major bumps need a real migration PR, not a constraint widening (see #6).
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
 
   # Docker base image — Dockerfile (bundles LibreOffice, deployed as the remote-transport server)
   - package-ecosystem: "docker"
