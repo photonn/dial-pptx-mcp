@@ -8,8 +8,18 @@ from .presentation_utils import *
 from .content_utils import *
 from .design_utils import *
 from .validation_utils import *
+from .slide_utils import *
 
 __all__ = [
+    # Slide structure utilities
+    "delete_slide",
+    "move_slide",
+    "duplicate_slide",
+    "copy_slide_to_presentation",
+    "get_speaker_notes",
+    "set_speaker_notes",
+    "check_index",
+
     # Core utilities
     "safe_operation",
     "try_multiple_approaches",
