@@ -294,6 +294,41 @@ def _check_geometry(slide_index, shape_index, shape, width, height, report):
         slide=slide_index, shape=shape_index)
 
 
+def _check_transform(slide_index, shape_index, shape, report):
+    """Report an `a:xfrm` that names a size but no offset, or the reverse.
+
+    Neither visual QA nor _check_geometry can see this one. python-pptx reports
+    the value the placeholder inherits for whichever half is missing, and
+    LibreOffice renders from the same fallback, so the shape looks correctly
+    placed everywhere we can look at it. PowerPoint reads the half-written
+    transform literally: the missing offset is the slide's top-left corner and
+    a missing extent is nothing at all.
+    """
+    xfrm = None
+    spPr = shape._element.find(qn("p:spPr"))
+    if spPr is not None:
+        xfrm = spPr.find(qn("a:xfrm"))
+    if xfrm is None:
+        xfrm = shape._element.find(qn("p:xfrm"))
+    if xfrm is None:
+        return
+    missing = [part for part in ("off", "ext")
+               if xfrm.find(qn("a:" + part)) is None]
+    if not missing:
+        return
+    lost = ("position" if missing == ["off"]
+            else "size" if missing == ["ext"] else "position and size")
+    report.add(
+        WARNING, "partial_transform",
+        f"Slide {slide_index}, shape {shape_index} ('{shape.name}') has a "
+        f"transform with no {lost}. It renders in place in LibreOffice, which "
+        f"falls back to the layout, but PowerPoint will draw it at the "
+        f"top-left corner of the slide.",
+        "Give it an explicit position and size with visual_repair_slides "
+        "(move_shape writes both).",
+        slide=slide_index, shape=shape_index)
+
+
 def _check_picture(slide_index, shape_index, shape, report):
     """Report a picture stretched off its native aspect ratio.
 
@@ -407,6 +442,7 @@ def _check_slides(pres, report):
             try:
                 _check_geometry(slide_index, shape_index, shape, width, height,
                                 report)
+                _check_transform(slide_index, shape_index, shape, report)
                 _check_placeholder_text(slide_index, shape_index, shape, report)
                 if getattr(shape, "has_chart", False):
                     _check_chart(slide_index, shape_index, shape, report)

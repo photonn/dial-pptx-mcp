@@ -98,6 +98,30 @@ rendered image: visual repair can only move or delete a picture. **Address value
 `chart.value_axis` returns the *second* `valAx` when a chart has two (it assumes a scatter chart), so titling "the
 value axis" puts the left axis' title on the right-hand one.
 
+`add_chart`'s `categories` argument means something different for `scatter`, the one type with no category axis: it
+carries the **x values** and they must parse as numbers (`parse_scatter_x_values`), because both axes are numeric and
+the series need `c:xVal`. That is also why scatter takes `XyChartData` rather than `CategoryChartData` — the type was
+advertised for a long time while every call raised.
+
+**Renderer-divergent defaults.** Visual QA renders through LibreOffice but the deck is delivered to PowerPoint, so any
+setting left *implicit* in the XML is a place where the two can disagree and the QA render will not show it. Two known
+classes, both fixed at the point of creation rather than in QA:
+
+- *Omitted `c:` booleans.* ECMA-376 reads a missing boolean as **true**; PowerPoint applies that, LibreOffice does not.
+  python-pptx's bar/column/pie writers emit no `c:varyColors` (PowerPoint then colours a single-series bar chart one
+  colour per category and lists the categories in the legend) and `chart.has_legend = True` inserts a bare `<c:legend/>`
+  with no `c:overlay` (PowerPoint lays the legend over the plot) and no `c:legendPos`. `normalize_chart_defaults` in
+  `utils/content_utils.py` runs at the end of `add_chart` and writes `varyColors`, `overlay`, `legendPos` and
+  `plotVisOnly` out; `format_chart` sets `autoTitleDeleted` for an untitled chart, since PowerPoint would otherwise
+  auto-title it from the series name. `add_combo_chart` already builds its own explicit XML and needs none of this.
+- *Half-written `a:xfrm`.* Setting one dimension on a placeholder that inherits its geometry (`shape.width = ...` with no
+  `a:xfrm` present) makes python-pptx create a transform holding only what was set — no `a:off`, or an `a:ext` with a zero
+  extent. LibreOffice falls back to the layout and renders it in place; PowerPoint reads it literally and parks the shape
+  in the slide's top-left corner. python-pptx also reports the *inherited* value for the missing half, so the defect is
+  invisible through the API too. `pin_inherited_geometry` (`utils/slide_utils.py`) materializes all four values first and
+  is called by `visual_fix`'s `move_shape`/`resize_shape`; `deck_validation._check_transform` reports any that slip
+  through as `partial_transform`. Any new code that writes shape geometry must pin first.
+
 **Two unrelated meanings of "template".** (1) A corporate `.pptx`/`.potx` file that *becomes* the presentation, preserving
 theme/masters/layouts byte-for-byte — `create_presentation_from_template{,_content}` in `tools/presentation_tools.py`, with
 `.potx` handled by content-type coercion in `utils/presentation_utils.py`. (2) `slide_layout_templates.json` — 23
