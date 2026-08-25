@@ -9,6 +9,7 @@ import io
 import unittest
 
 from pptx import Presentation
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
 import deck_validation
@@ -84,6 +85,86 @@ class TestGeometryChecks(unittest.TestCase):
         self.assertEqual(problem["slide_index"], 1)
         self.assertEqual(problem["shape_index"], 0)
         self.assertIn("visual_repair_slides", problem["fix"])
+
+
+class TestPartialTransform(unittest.TestCase):
+    """A half-written a:xfrm — the LibreOffice-only-looks-fine defect.
+
+    python-pptx reports the inherited value for the half that is missing, so
+    the shape reads as correctly placed through the API and renders correctly
+    in LibreOffice. Only PowerPoint moves it to the corner, which is why the
+    geometry check cannot catch this and a separate one has to.
+    """
+
+    def broken_deck(self, *, drop):
+        pres = Presentation()
+        slide = pres.slides.add_slide(pres.slide_layouts[1])  # title + content
+        shape = slide.placeholders[1]
+        xfrm = shape._element.spPr.find(qn("a:xfrm"))
+        if xfrm is None:
+            shape.left, shape.top = shape.left, shape.top
+            shape.width, shape.height = shape.width, shape.height
+            xfrm = shape._element.spPr.find(qn("a:xfrm"))
+        xfrm.remove(xfrm.find(qn("a:" + drop)))
+        return pres, shape
+
+    def test_missing_offset_is_a_warning(self):
+        pres, shape = self.broken_deck(drop="off")
+        report = deck_validation.validate_presentation(pres)
+        self.assertIn("partial_transform", codes(report, "warning"))
+        # The geometry check sees nothing wrong — that is the whole point.
+        self.assertNotIn("shape_off_slide", codes(report))
+        self.assertIsNotNone(shape.left)
+
+    def test_missing_extent_is_a_warning(self):
+        pres, _ = self.broken_deck(drop="ext")
+        report = deck_validation.validate_presentation(pres)
+        self.assertIn("partial_transform", codes(report, "warning"))
+
+    def test_the_message_names_what_powerpoint_substitutes(self):
+        # The two halves fail differently, and so does the fix for each.
+        for drop, said, fix_tool in (("off", "top-left corner", "move_shape"),
+                                     ("ext", "no size", "resize_shape")):
+            with self.subTest(drop=drop):
+                pres, _ = self.broken_deck(drop=drop)
+                report = deck_validation.validate_presentation(pres)
+                problem = next(p for p in report["problems"]
+                               if p["code"] == "partial_transform")
+                self.assertIn(said, problem["message"])
+                self.assertIn(fix_tool, problem["fix"])
+
+    def test_a_missing_extent_does_not_claim_the_corner(self):
+        pres, _ = self.broken_deck(drop="ext")
+        problem = next(p for p in deck_validation.validate_presentation(pres)
+                       ["problems"] if p["code"] == "partial_transform")
+        self.assertNotIn("top-left corner", problem["message"])
+
+    def test_the_problem_names_the_shape_and_a_fix(self):
+        pres, _ = self.broken_deck(drop="off")
+        report = deck_validation.validate_presentation(pres)
+        problem = next(p for p in report["problems"]
+                       if p["code"] == "partial_transform")
+        self.assertEqual(problem["slide_index"], 0)
+        self.assertEqual(problem["shape_index"], 1)
+        self.assertIn("visual_repair_slides", problem["fix"])
+        self.assertIn("PowerPoint", problem["message"])
+
+    def test_a_complete_transform_is_not_reported(self):
+        pres = Presentation()
+        slide = pres.slides.add_slide(pres.slide_layouts[1])
+        shape = slide.placeholders[1]
+        shape.left, shape.top = shape.left, shape.top
+        shape.width, shape.height = shape.width, shape.height
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("partial_transform", codes(report))
+
+    def test_an_inheriting_placeholder_is_not_reported(self):
+        # No a:xfrm at all is correct: the placeholder inherits all four
+        # values and every renderer agrees on them.
+        pres = Presentation()
+        pres.slides.add_slide(pres.slide_layouts[1])
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("partial_transform", codes(report))
 
 
 class TestPlaceholderText(unittest.TestCase):

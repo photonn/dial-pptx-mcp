@@ -44,6 +44,7 @@ from pptx.enum.chart import XL_LEGEND_POSITION
 from pptx.enum.text import MSO_AUTO_SIZE
 from pptx.util import Emu, Inches, Pt
 
+import utils as ppt_utils
 from logging_utils import get_logger, flatten
 
 logger = get_logger("visual_fix")
@@ -432,6 +433,7 @@ def apply_repairs(pres, operations, allowed_slides=None):
                         and _in_range(op.get("top_in"), POSITION_IN_RANGE)):
                     skipped.append({"op": op, "reason": "position out of range"})
                     continue
+                ppt_utils.pin_inherited_geometry(shape)
                 shape.left = Inches(op["left_in"])
                 shape.top = Inches(op["top_in"])
             elif kind == "resize_shape":
@@ -439,6 +441,7 @@ def apply_repairs(pres, operations, allowed_slides=None):
                 if w is None and h is None:
                     skipped.append({"op": op, "reason": "no dimensions"})
                     continue
+                ppt_utils.pin_inherited_geometry(shape)
                 if w is not None:
                     if not _in_range(w, SIZE_IN_RANGE):
                         skipped.append({"op": op, "reason": "width out of range"})

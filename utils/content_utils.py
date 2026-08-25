@@ -3,8 +3,8 @@ Content management utilities for PowerPoint MCP Server.
 Functions for slides, text, images, tables, charts, and shapes.
 """
 from pptx import Presentation
-from pptx.chart.data import CategoryChartData
-from pptx.enum.chart import XL_CHART_TYPE
+from pptx.chart.data import CategoryChartData, XyChartData
+from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -376,6 +376,104 @@ def format_table_cell(cell, font_size: int = None, font_name: str = None,
         cell.fill.fore_color.rgb = RGBColor(*bg_color)
 
 
+# Chart-group elements that colour each data point separately; every other
+# plot type gets one colour per series.
+_PER_POINT_COLOUR_PLOTS = ('pieChart', 'pie3DChart', 'ofPieChart',
+                           'doughnutChart')
+
+_LEGEND_POSITIONS = {
+    'right': XL_LEGEND_POSITION.RIGHT,
+    'left': XL_LEGEND_POSITION.LEFT,
+    'top': XL_LEGEND_POSITION.TOP,
+    'bottom': XL_LEGEND_POSITION.BOTTOM,
+    'corner': XL_LEGEND_POSITION.CORNER,
+}
+
+_CHART_NS = 'http://schemas.openxmlformats.org/drawingml/2006/chart'
+
+
+def _c(tag: str) -> str:
+    return '{%s}%s' % (_CHART_NS, tag)
+
+
+def normalize_chart_defaults(chart) -> None:
+    """Make explicit the chart settings whose XML default is renderer-dependent.
+
+    python-pptx leaves several optional ``c:`` elements out of the charts it
+    generates. Where ECMA-376 says a missing boolean means *true*, PowerPoint
+    applies it and LibreOffice does not, so one file renders as two different
+    charts:
+
+    * no ``c:varyColors`` — PowerPoint colours a single-series bar chart one
+      colour per *category* and lists the categories in the legend, where
+      LibreOffice draws a single series colour and a single legend entry.
+    * a bare ``c:legend`` — PowerPoint reads the absent ``c:overlay`` as true
+      and lays the legend over the plot; LibreOffice reserves space beside it.
+
+    Writing both out is what makes the two agree, and it also means visual QA
+    (which renders through LibreOffice) is judging what PowerPoint will show.
+    """
+    plot_area = chart._chartSpace.find(_c('chart')).find(_c('plotArea'))
+    for group in plot_area:
+        tag = group.tag.split('}')[-1]
+        if not tag.endswith('Chart'):
+            continue
+        if group.find(_c('varyColors')) is not None:
+            continue
+        vary = '1' if tag in _PER_POINT_COLOUR_PLOTS else '0'
+        if hasattr(group, 'get_or_add_varyColors'):
+            group.get_or_add_varyColors().val = vary == '1'
+        else:
+            # varyColors sits immediately before the series in every group.
+            element = group.makeelement(_c('varyColors'), {'val': vary})
+            first_ser = group.find(_c('ser'))
+            if first_ser is not None:
+                first_ser.addprevious(element)
+            else:
+                group.insert(0, element)
+
+    if chart.has_legend:
+        legend = chart.legend
+        if legend._element.find(_c('legendPos')) is None:
+            legend.position = XL_LEGEND_POSITION.RIGHT
+        # The one that matters: absent, PowerPoint overlays the legend.
+        legend.include_in_layout = False
+
+    # Missing c:plotVisOnly also defaults to true; say so rather than rely on it.
+    chart_el = chart._chartSpace.find(_c('chart'))
+    if chart_el.find(_c('plotVisOnly')) is None:
+        element = chart_el.makeelement(_c('plotVisOnly'), {'val': '1'})
+        chart_el.insert_element_before(element, 'c:dispBlanksAs',
+                                       'c:showDLblsOverMax', 'c:extLst')
+
+
+# Chart types plotted from x/y pairs rather than from categories. They need a
+# different chart-data class, and their x values have to be numbers.
+SCATTER_CHART_TYPES = frozenset({'scatter'})
+
+
+def parse_scatter_x_values(categories) -> List[float]:
+    """Read a scatter chart's x values out of the `categories` argument.
+
+    A scatter chart has no categories: both axes are numeric. The tool takes
+    one list of labels for every chart type, so on a scatter chart that list
+    is the x values and has to parse as numbers. Raises ValueError naming what
+    to send instead — the caller turns that into the tool's error string.
+    """
+    x_values = []
+    for value in categories:
+        try:
+            x_values.append(float(value))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"A scatter chart plots numbers against numbers, but "
+                f"categories contains '{value}'. Pass the x values in "
+                f"categories (as numbers) and the matching y values in "
+                f"series_values, or use 'line_markers' if the horizontal "
+                f"axis really is a list of labels.")
+    return x_values
+
+
 def add_chart(slide, chart_type: str, left: float, top: float, width: float, height: float,
               categories: List[str], series_names: List[str], series_values: List[List[float]]) -> Any:
     """
@@ -412,22 +510,37 @@ def add_chart(slide, chart_type: str, left: float, top: float, width: float, hei
         'radar_markers': XL_CHART_TYPE.RADAR_MARKERS
     }
     
-    xl_chart_type = chart_type_map.get(chart_type.lower(), XL_CHART_TYPE.COLUMN_CLUSTERED)
+    chart_type = chart_type.lower()
+    xl_chart_type = chart_type_map.get(chart_type, XL_CHART_TYPE.COLUMN_CLUSTERED)
     
-    # Create chart data
-    chart_data = CategoryChartData()
-    chart_data.categories = categories
-    
-    for i, series_name in enumerate(series_names):
-        if i < len(series_values):
-            chart_data.add_series(series_name, series_values[i])
+    # Create chart data. A scatter chart carries its own x values per point
+    # instead of a shared category axis, and CategoryChartData cannot write
+    # the c:xVal element its series need.
+    if chart_type in SCATTER_CHART_TYPES:
+        x_values = parse_scatter_x_values(categories)
+        chart_data = XyChartData()
+        for i, series_name in enumerate(series_names):
+            if i >= len(series_values):
+                continue
+            series = chart_data.add_series(series_name)
+            for x, y in zip(x_values, series_values[i]):
+                series.add_data_point(x, y)
+    else:
+        chart_data = CategoryChartData()
+        chart_data.categories = categories
+        
+        for i, series_name in enumerate(series_names):
+            if i < len(series_values):
+                chart_data.add_series(series_name, series_values[i])
     
     # Add chart to slide
     chart_shape = slide.shapes.add_chart(
         xl_chart_type, Inches(left), Inches(top), Inches(width), Inches(height), chart_data
     )
     
-    return chart_shape.chart
+    chart = chart_shape.chart
+    normalize_chart_defaults(chart)
+    return chart
 
 
 def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
@@ -450,16 +563,22 @@ def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
         color_scheme: Color scheme to apply
     """
     try:
-        # Set chart title
+        # Set chart title. An absent title is stated as autoTitleDeleted rather
+        # than left out: PowerPoint auto-titles a single-series chart from the
+        # series name, LibreOffice does not, so silence is two different charts.
         if title:
             chart.chart_title.text_frame.text = title
-        
-        # Configure legend
-        if has_legend:
-            chart.has_legend = True
-            # Note: Legend position setting may vary by chart type
         else:
-            chart.has_legend = False
+            chart.has_title = False
+        
+        # Configure legend. legendPos and overlay are both written out — see
+        # normalize_chart_defaults for why leaving them implicit diverges.
+        chart.has_legend = bool(has_legend)
+        if has_legend:
+            position = _LEGEND_POSITIONS.get((legend_position or 'right').lower())
+            if position is not None:
+                chart.legend.position = position
+            chart.legend.include_in_layout = False
         
         # Configure data labels
         if has_data_labels:

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 
 import visual_fix
@@ -105,6 +106,68 @@ def make_rich_deck():
                                    Inches(3), Inches(4), Inches(3), data)
     frame.chart.plots[0].has_data_labels = True
     return pres, table, frame.chart
+
+
+class TestPlaceholderGeometry(unittest.TestCase):
+    """Moving or resizing an inheriting placeholder must write all four values.
+
+    python-pptx writes only what you set. On a placeholder that had no a:xfrm
+    the result is a half-written transform: LibreOffice falls back to the
+    layout and renders it in place, PowerPoint reads it literally and drops the
+    shape in the top-left corner. Both ops have to leave a complete transform.
+    """
+
+    def setUp(self):
+        self.pres = Presentation()
+        slide = self.pres.slides.add_slide(self.pres.slide_layouts[1])
+        self.shape = slide.placeholders[1]
+        self.inherited = (self.shape.left, self.shape.top,
+                          self.shape.width, self.shape.height)
+        self.assertIsNone(self.shape._element.spPr.find(qn("a:xfrm")),
+                          "fixture must start out inheriting its geometry")
+
+    def xfrm(self):
+        return self.shape._element.spPr.find(qn("a:xfrm"))
+
+    def assert_complete(self):
+        xfrm = self.xfrm()
+        self.assertIsNotNone(xfrm)
+        self.assertIsNotNone(xfrm.find(qn("a:off")), "a:off missing")
+        self.assertIsNotNone(xfrm.find(qn("a:ext")), "a:ext missing")
+
+    def apply(self, op):
+        result = visual_fix.apply_repairs(self.pres, [dict(op, slide=1,
+                                                           shape_index=1)])
+        self.assertEqual(result["skipped"], [])
+        return result
+
+    def test_resizing_keeps_the_inherited_position(self):
+        self.apply({"op": "resize_shape", "width_in": 3.0, "height_in": 2.0})
+        self.assert_complete()
+        self.assertEqual((self.shape.left, self.shape.top),
+                         self.inherited[:2])
+        self.assertEqual(self.shape.width, Inches(3.0))
+        self.assertEqual(self.shape.height, Inches(2.0))
+
+    def test_resizing_one_dimension_keeps_the_other(self):
+        self.apply({"op": "resize_shape", "width_in": 3.0})
+        self.assert_complete()
+        self.assertEqual(self.shape.height, self.inherited[3])
+
+    def test_moving_keeps_the_inherited_size(self):
+        self.apply({"op": "move_shape", "left_in": 2.0, "top_in": 3.0})
+        self.assert_complete()
+        self.assertEqual((self.shape.left, self.shape.top),
+                         (Inches(2.0), Inches(3.0)))
+        self.assertEqual((self.shape.width, self.shape.height),
+                         self.inherited[2:])
+
+    def test_an_untouched_placeholder_keeps_inheriting(self):
+        # Pinning is for shapes being edited; it must not materialize a
+        # transform on every placeholder in the deck.
+        visual_fix.apply_repairs(self.pres, [
+            {"op": "set_text", "slide": 1, "shape_index": 1, "text": "Hi"}])
+        self.assertIsNone(self.xfrm())
 
 
 class TestDescribeNonTextShapes(unittest.TestCase):

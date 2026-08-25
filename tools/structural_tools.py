@@ -324,6 +324,11 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
         HORIZONTAL, so x_axis_title appears on the vertical axis. Naming a
         bar chart's axes by where they look on screen is the usual way these
         two end up swapped.
+
+        A 'scatter' chart is the exception to both: it has no category axis,
+        so pass its x values (as numbers) in categories and the matching y
+        values in series_values. Use 'line_markers' when the horizontal axis
+        is really a list of labels.
         """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
@@ -369,6 +374,15 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
                 return {
                     "error": f"Series '{series_names[i]}' has {len(values)} values but there are {len(categories)} categories"
                 }
+        
+        # A scatter chart has no category axis: `categories` carries its x
+        # values, so they have to be numbers. Checked here to report it as an
+        # instruction rather than as a "Failed to add chart" exception string.
+        if chart_type.lower() in ppt_utils.SCATTER_CHART_TYPES:
+            try:
+                ppt_utils.parse_scatter_x_values(categories)
+            except ValueError as e:
+                return {"error": str(e)}
         
         try:
             # Add the chart

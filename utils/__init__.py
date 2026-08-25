@@ -28,6 +28,7 @@ __all__ = [
     "copy_slide_to_presentation",
     "get_speaker_notes",
     "set_speaker_notes",
+    "pin_inherited_geometry",
     "check_index",
 
     # Core utilities
@@ -58,6 +59,9 @@ __all__ = [
     "format_table_cell",
     "add_chart",
     "format_chart",
+    "normalize_chart_defaults",
+    "SCATTER_CHART_TYPES",
+    "parse_scatter_x_values",
     
     # Design utilities
     "get_professional_color",

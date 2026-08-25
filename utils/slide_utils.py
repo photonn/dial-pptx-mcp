@@ -33,6 +33,7 @@ __all__ = [
     "copy_slide_to_presentation",
     "get_speaker_notes",
     "set_speaker_notes",
+    "pin_inherited_geometry",
 ]
 
 # Relationship targets shared (referenced) rather than cloned by a duplicate.
@@ -354,3 +355,38 @@ def set_speaker_notes(slide, text):
     if not (text or slide.has_notes_slide):
         return
     slide.notes_slide.notes_text_frame.text = text or ""
+
+
+# ---- Placeholder geometry ----
+
+def pin_inherited_geometry(shape):
+    """Write a placeholder's inherited position and size into its own `a:xfrm`.
+
+    A placeholder with no ``<a:xfrm>`` takes all four values from the layout.
+    Setting one of them — ``shape.width = ...`` — makes python-pptx create an
+    ``<a:xfrm>`` holding only what was set: an ``<a:ext>`` with a zero for the
+    extent nobody supplied, and no ``<a:off>`` at all. That partial transform
+    stops the inheritance dead. LibreOffice falls back to the layout anyway and
+    still draws the shape in place, so the render looks right; PowerPoint reads
+    it literally and parks the shape at the top-left corner of the slide. It is
+    the classic "renders fine in LibreOffice, lands in the corner in
+    PowerPoint" defect, and it is invisible to visual QA for exactly that
+    reason.
+
+    Copying all four values across first turns any later geometry edit into an
+    edit of a fully specified shape. Returns True when it materialized a
+    transform, False when the shape already had one or is not a placeholder.
+    """
+    if not getattr(shape, "is_placeholder", False):
+        return False
+    # A graphic-frame placeholder (chart, table) keeps its transform in a
+    # p:xfrm that python-pptx always writes in full, and has no spPr at all.
+    spPr = getattr(shape._element, "spPr", None)
+    if spPr is None or spPr.find(qn("a:xfrm")) is not None:
+        return False
+    left, top, width, height = shape.left, shape.top, shape.width, shape.height
+    if None in (left, top, width, height):
+        return False
+    shape.left, shape.top = left, top
+    shape.width, shape.height = width, height
+    return True
