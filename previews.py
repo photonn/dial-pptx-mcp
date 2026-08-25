@@ -17,7 +17,7 @@ deck that previews is a deck that renders.
 """
 import io
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from logging_utils import get_logger
 
@@ -39,12 +39,45 @@ _BORDER = (200, 200, 206)
 
 JPEG_MIME = "image/jpeg"
 
+# The summary card is one image of a whole deck, so its cells shrink as the
+# deck grows. These bound the result: a card wider than CARD_MAX_WIDTH is
+# scaled down in a chat window anyway, and CARD_MIN_CELL_WIDTH is the point
+# below which a thumbnail stops being recognisable. When the two conflict the
+# minimum wins and the card gets taller — a tall card scrolls, an illegible
+# one is useless.
+CARD_MAX_WIDTH = 2000
+CARD_MAX_HEIGHT = 2600
+CARD_MIN_CELL_WIDTH = 150
+CARD_TARGET_ASPECT = 1.4
+# Cell captions scale with the cells: an 11px bitmap caption under a 480px
+# thumbnail is as hard to read as a full-size one under a 150px thumbnail.
+_CARD_MIN_FONT = 11
+_CARD_MAX_FONT = 18
+_HEADER_HEIGHT = 44
+_HEADER_FONT = 20
 
-def _label(draw, box, text):
+
+def _font(size):
+    """A scalable font, falling back to the fixed 11px bitmap default.
+
+    Pillow only grew `load_default(size=)` in 10.1; on anything older the
+    labels are small rather than absent.
+    """
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _text_height(font):
+    return font.getbbox("Ag")[3] if font is not None else 11
+
+
+def _label(draw, box, text, height=_LABEL_HEIGHT, font=None):
     left, top, right, _ = box
-    draw.rectangle([left, top, right, top + _LABEL_HEIGHT],
-                   fill=_LABEL_BACKGROUND)
-    draw.text((left + 6, top + 5), text, fill=_LABEL_TEXT)
+    draw.rectangle([left, top, right, top + height], fill=_LABEL_BACKGROUND)
+    draw.text((left + 6, top + (height - _text_height(font)) // 2), text,
+              fill=_LABEL_TEXT, font=font)
 
 
 def compose_contact_sheet(images, numbers, columns=DEFAULT_COLUMNS):
@@ -143,3 +176,111 @@ def describe_slides(images, numbers, timeout=300.0):
     if not isinstance(described, list):
         return None
     return [item for item in described if isinstance(item, dict)]
+
+
+def auto_columns(count, tile_aspect=16 / 9, target=CARD_TARGET_ASPECT):
+    """Pick a column count that keeps the whole grid roughly `target`-shaped.
+
+    Laying 30 wide slides out in 4 columns gives a card three times taller
+    than it is wide, which a chat window shows as a stripe. Solving
+    (columns * w) / (rows * h) = target for a square-ish grid gives this.
+    """
+    if count <= 1:
+        return 1
+    return max(1, min(count, round((count * target / tile_aspect) ** 0.5)))
+
+
+def _card_label_height(cell_w):
+    size = max(_CARD_MIN_FONT, min(_CARD_MAX_FONT, cell_w // 22))
+    return size + 8
+
+
+def _fit(tile, cell_w, cell_h):
+    scale = min(cell_w / tile.width, cell_h / tile.height)
+    if scale >= 1:
+        return tile
+    return tile.resize((max(1, round(tile.width * scale)),
+                        max(1, round(tile.height * scale))),
+                       Image.LANCZOS)
+
+
+def _header(draw, width, title, count):
+    font = _font(_HEADER_FONT)
+    baseline = (_HEADER_HEIGHT - _text_height(font)) // 2
+    draw.rectangle([0, 0, width, _HEADER_HEIGHT], fill=_LABEL_BACKGROUND)
+    draw.text((_PADDING, baseline), title, fill=_LABEL_TEXT, font=font)
+    tally = f"{count} slide{'s' if count != 1 else ''}"
+    draw.text((width - _PADDING - draw.textlength(tally, font=font), baseline),
+              tally, fill=_LABEL_TEXT, font=font)
+
+
+def compose_summary_card(images, numbers, title=None, columns=None,
+                         max_width=CARD_MAX_WIDTH,
+                         max_height=CARD_MAX_HEIGHT):
+    """Tile every slide into a single labelled card image (JPEG bytes).
+
+    Unlike compose_contact_sheet, which pages a long deck into several sheets
+    of same-size thumbnails, this always returns exactly one image and scales
+    the cells to fit it — the card is a finished-work summary a person looks
+    at once, and two of them is not a summary.
+    """
+    tiles = [Image.open(io.BytesIO(data)).convert("RGB") for data in images]
+    if not tiles:
+        raise ValueError("no slides to summarize")
+
+    native_w = max(tile.width for tile in tiles)
+    native_h = max(tile.height for tile in tiles)
+    if columns is None:
+        columns = auto_columns(len(tiles), native_w / native_h)
+    columns = max(1, min(int(columns), len(tiles)))
+    rows = (len(tiles) + columns - 1) // columns
+
+    header = _HEADER_HEIGHT if title else 0
+    cell_w = min(native_w,
+                 (max_width - (columns + 1) * _PADDING) // columns)
+    label_h = _card_label_height(cell_w)
+    room = max_height - header - (rows + 1) * _PADDING - rows * label_h
+    if room > 0:
+        cell_w = min(cell_w, int(room / rows * native_w / native_h))
+    cell_w = max(CARD_MIN_CELL_WIDTH, cell_w)
+    label_h = _card_label_height(cell_w)
+    label_font = _font(label_h - 8)
+    cell_h = max(1, round(cell_w * native_h / native_w))
+
+    sheet_w = columns * cell_w + (columns + 1) * _PADDING
+    sheet_h = header + rows * (cell_h + label_h) + (rows + 1) * _PADDING
+    card = Image.new("RGB", (sheet_w, sheet_h), _BACKGROUND)
+    draw = ImageDraw.Draw(card)
+    if title:
+        _header(draw, sheet_w, title, len(tiles))
+
+    for index, (tile, number) in enumerate(zip(tiles, numbers)):
+        row, column = divmod(index, columns)
+        left = _PADDING + column * (cell_w + _PADDING)
+        top = header + _PADDING + row * (cell_h + label_h + _PADDING)
+        _label(draw, (left, top, left + cell_w, top + cell_h + label_h),
+               f"Slide {number}", label_h, label_font)
+        scaled = _fit(tile, cell_w, cell_h)
+        card.paste(scaled, (left + (cell_w - scaled.width) // 2,
+                            top + label_h + (cell_h - scaled.height) // 2))
+        draw.rectangle([left, top, left + cell_w - 1,
+                        top + cell_h + label_h - 1], outline=_BORDER)
+
+    buffer = io.BytesIO()
+    card.save(buffer, format="JPEG", quality=82, optimize=True)
+    logger.debug("summary_card_built slides=%d columns=%d size=%dx%d bytes=%d",
+                 len(tiles), columns, sheet_w, sheet_h, buffer.tell())
+    return buffer.getvalue(), (sheet_w, sheet_h), columns
+
+
+def render_summary_card(pres, title=None, columns=None):
+    """Render every slide of a deck into one summary card.
+
+    Returns (jpeg_bytes, (width, height), columns, slide_count).
+    """
+    import visual_qa
+
+    images = visual_qa._render_deck(pres, None, None)
+    card, size, columns = compose_summary_card(
+        images, list(range(1, len(images) + 1)), title, columns)
+    return card, size, columns, len(images)

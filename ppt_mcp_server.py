@@ -64,7 +64,9 @@ app = FastMCP(
         "visual_inspect_slides(slides=[n]). Before exporting, run "
         "validate_presentation for structural faults and visual_repair_slides "
         "for appearance; they check different things. Deliver the deck with "
-        "export_presentation and give the user the file URL it returns."
+        "export_presentation and give the user the file URL it returns, then "
+        "call render_deck_summary_card and attach its image so the user can "
+        "see the finished deck without opening the file."
     ),
 )
 

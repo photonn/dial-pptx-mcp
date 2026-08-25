@@ -256,6 +256,9 @@ Design quality comes out of the loop, not out of the first attempt:
 7. **Read the text back** with `extract_presentation_text` — check for missing
    sections, duplicated content, and template filler nobody replaced.
 8. **Export** with `export_presentation` and give the user the file URL.
+9. **Show your work**: `render_deck_summary_card` tiles the finished deck into
+   one image. Attach it next to the file so the user can see what they got
+   without opening PowerPoint.
 
 Your first render will have a few genuine problems: overflow, an overlap, an
 alignment that drifted. Fix those and stop. Iterating past the point where the

@@ -80,9 +80,15 @@ mtime-cached, split on its own `## N. Title` headings) and is served whole or by
 caller is building. Its premise is that template mode is the default: inherit the user's design, don't invent one over
 it. Keep it consistent with the tool names it references.
 
-**Previews (`previews.py`, `tools/preview_tools.py`).** Contact sheets for choosing a template slide. The agent cannot
-look at an image, so the vision-model description is the part it can act on and the uploaded sheet is for the person;
-an upload failure must not lose the descriptions. Registered only when `soffice` exists.
+**Previews (`previews.py`, `tools/preview_tools.py`).** Two composers with opposite audiences, sharing one renderer.
+`render_slide_previews` builds contact sheets for choosing a template slide: the agent cannot look at an image, so the
+vision-model description is the part it can act on and the uploaded sheet is for the person, which is why an upload
+failure must not lose the descriptions. `render_deck_summary_card` is the delivery-time mirror — the whole deck in
+**exactly one** image, no slide cap and no vision call, attached beside the exported file so the user sees the result
+without opening PowerPoint. There the stored image *is* the deliverable, so a failed upload is an error, not a note.
+Its column count is fitted per deck (`auto_columns`) because a fixed grid turns a long deck into a stripe, and cells
+scale to the `CARD_MAX_*` budget except that `CARD_MIN_CELL_WIDTH` wins: an over-tall card scrolls, an illegible one is
+useless. Both registered only when `soffice` exists.
 
 **Combo charts (`utils/combo_chart_utils.py`).** A plot area holds a *list* of chart-group elements, each naming its
 axis pair, so `add_combo_chart` builds an ordinary single-type chart with every series (that is what writes a correct

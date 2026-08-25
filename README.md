@@ -17,7 +17,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations` — python-pptx has no API for any of these |
 | Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
 | Validation | none | `validate_presentation`: package, relationship, geometry, chart, table and placeholder-text checks, folded into export |
-| Design | — | `get_design_guidance` (deck design as a document the agent reads) and `render_slide_previews` (see the template before building on it) |
+| Design | — | `get_design_guidance` (deck design as a document the agent reads), `render_slide_previews` (see the template before building on it) and `render_deck_summary_card` (show the finished deck as one image) |
 | Charts | one type, one axis per chart | `add_combo_chart` (mixed series types, secondary value axis) and `format_chart_series` (colour, labels, trendlines) |
 | Output | `.pptx` | `.pptx`, `.pdf`, or both; PowerPoint 97-2003 `.ppt` accepted as input |
 | Deployment | — | Dockerfile (non-root, HTTP defaults) + generic Kubernetes example |
@@ -190,6 +190,12 @@ Its first section is the one that matters most here: this server's default case 
 
 `render_slide_previews(presentation_id, slides?, describe?, columns?)` renders the deck into labelled contact sheets, uploads them to DIAL storage (so a person can look at them), and — since the agent cannot see an image — has the vision model describe what each slide is structurally suited to. Use it right after opening a template: layout names and indices cannot tell you which of eight near-identical layouts holds the three-card row. Registered only where LibreOffice is present.
 
+### The finished-deck summary card
+
+`render_deck_summary_card(presentation_id, title?, columns?, filename?)` tiles **every** slide into a single labelled JPEG, uploads it to DIAL storage and returns the `image_url`. It is meant for the end of the job, attached beside the exported `.pptx`: the user sees the whole deck in the chat without downloading a file and opening PowerPoint.
+
+It is deliberately the mirror image of `render_slide_previews`. That tool is for the agent — several sheets, capped at 24 slides, and the part that matters is the vision model's description of each slide, because the agent cannot see a picture. This one is for the person: always exactly one image, no cap and no vision call. The grid's column count is fitted to the deck's length so a 60-slide deck comes back roughly landscape rather than as a tall stripe, and cells shrink to keep the card inside 2000×2600px — but never below 150px wide, since a card that scrolls beats one whose thumbnails are unreadable. Registered only where LibreOffice is present.
+
 ### Charts
 
 `add_chart` builds one chart group: every series the same type, on one value axis. `add_combo_chart` covers what that cannot — bars with a target line across them, or two measures whose units differ so much that one flattens to nothing on a shared axis:
@@ -283,6 +289,8 @@ reports, then call visual_inspect_slides once with no slides argument to check
 the deck as a whole. If the export response says
 "visual_qa": "unverified", say so in your answer rather than presenting the
 deck as checked.
+After exporting, call render_deck_summary_card and attach the image it returns
+alongside the .pptx, so the user can see the finished deck in the chat.
 ```
 
 Per-slide checks are the cheap path — one render plus one vision call each, caught while the slide is still fresh in context. Keep the whole-deck pass for the end: it is the only thing that marks the deck `passed`, and it catches cross-slide inconsistencies a single-slide review cannot see.

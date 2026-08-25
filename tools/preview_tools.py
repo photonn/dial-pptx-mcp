@@ -8,7 +8,11 @@ is configured, describes each slide's structure back to the caller — the agent
 cannot look at an image, so the description is the part it can act on, and the
 uploaded sheet is for the person.
 
-Rendering needs LibreOffice, the same dependency visual QA has, so the tool is
+`render_deck_summary_card` is the other end of the same pipeline: one image of
+the finished deck, for showing the user what was built without making them open
+the file.
+
+Rendering needs LibreOffice, the same dependency visual QA has, so the tools are
 registered only when the renderer is present.
 """
 from typing import Dict, List, Optional
@@ -28,10 +32,11 @@ UNKNOWN_ID = (
 )
 
 MAX_PREVIEW_SLIDES = 24
+DEFAULT_CARD_NAME = "deck-summary.jpg"
 
 
 def register_preview_tools(app: FastMCP, presentations):
-    """Register the slide-preview tool, if slides can be rendered at all."""
+    """Register the preview tools, if slides can be rendered at all."""
     import visual_qa
 
     try:
@@ -159,3 +164,88 @@ def register_preview_tools(app: FastMCP, presentations):
                     "described=%s", short_id(presentation_id), len(numbers),
                     len(sheets), "slide_descriptions" in result)
         return result
+
+
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="Render Deck Summary Card",
+            readOnlyHint=True,
+        ),
+    )
+    def render_deck_summary_card(
+        presentation_id: str,
+        title: Optional[str] = None,
+        columns: Optional[int] = None,
+        filename: str = DEFAULT_CARD_NAME,
+    ) -> Dict:
+        """Render the whole deck as ONE image, to show the user what you built.
+
+        Call this at the end of the job, after export_presentation, and put
+        the returned image_url in your final answer as an attachment
+        alongside the .pptx. It tiles every slide into a single labelled
+        card, so the user can see the finished deck at a glance without
+        opening the file.
+
+        This is for the user, not for you: it is one image and you cannot
+        see it. To check your own work use visual_inspect_slides, and to
+        choose a template slide use render_slide_previews.
+
+        title: caption for the card's header bar — use the deck's title.
+          Omit for no header.
+        columns: cells per row; omit to fit the grid to the deck's length.
+        filename: name of the stored image.
+
+        Returns "image_url" (a DIAL file URL), its mime_type and pixel size.
+        """
+        import previews
+        from dial_client import DialFileClient
+
+        if presentation_id not in presentations:
+            return {"error": UNKNOWN_ID}
+        pres = presentations[presentation_id]
+
+        if not len(pres.slides):
+            return {"error": "This presentation has no slides to summarize."}
+        if columns is not None and not 1 <= columns <= 8:
+            return {"error": "columns must be between 1 and 8, or omitted to "
+                             "fit the grid to the deck."}
+        if not filename.strip():
+            return {"error": "filename must not be empty."}
+
+        try:
+            card, size, used_columns, count = previews.render_summary_card(
+                pres, title, columns)
+        except visual_qa.VisualQAError as e:
+            logger.warning("summary_card_render_failed presentation_id=%s "
+                           "error=%s", short_id(presentation_id), e)
+            return {"error": f"Could not render the slides: {e}"}
+
+        # Unlike render_slide_previews, the stored image is the entire
+        # deliverable here — there is nothing left to return without it.
+        try:
+            client = DialFileClient()
+            url = client.upload(card, filename,
+                                content_type=previews.JPEG_MIME)
+        except Exception as e:
+            logger.warning("summary_card_upload_failed presentation_id=%s "
+                           "error=%s", short_id(presentation_id), e)
+            return {"error": f"The summary card was rendered but could not be "
+                             f"stored in DIAL ({e}), so there is no image to "
+                             f"show the user. Deliver the exported deck "
+                             f"without it."}
+
+        logger.info("summary_card_rendered presentation_id=%s slides=%d "
+                    "columns=%d size=%dx%d bytes=%d",
+                    short_id(presentation_id), count, used_columns,
+                    size[0], size[1], len(card))
+        return {
+            "message": f"Deck summary card stored at {url}. Include this "
+                       "image URL in your final answer as an attachment so "
+                       "the user can see the whole deck at a glance.",
+            "image_url": url,
+            "mime_type": previews.JPEG_MIME,
+            "size_bytes": len(card),
+            "image_size": {"width": size[0], "height": size[1]},
+            "slide_count": count,
+            "columns": used_columns,
+        }
