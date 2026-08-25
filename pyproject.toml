@@ -21,6 +21,8 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "python-pptx>=0.6.21",
+    # <2.0: 2.x drops mcp.server.fastmcp and the _tool_manager internals
+    # state.serialize_per_presentation patches. See CLAUDE.md.
     "mcp[cli]>=1.8.0,<2.0.0",
     "Pillow>=8.0.0",
     "fonttools>=4.0.0",

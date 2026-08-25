@@ -30,7 +30,7 @@ uv venv --python 3.12 .venv && uv pip install -r requirements.txt
 docker build -t dial-pptx-mcp . && docker run -p 8000:8000 dial-pptx-mcp
 ```
 
-There is no linter or formatter configured. CI (`.github/workflows/ci.yml`) runs the unittest suite on Python 3.10 and 3.12,
+There is no linter or formatter configured. CI (`.github/workflows/ci.yml`) runs the unittest suite on Python 3.10, 3.12 and 3.14 (3.14 is what the Docker image ships),
 the fidelity spike against the bundled demo deck, and a Docker build. Tests requiring LibreOffice self-skip when `soffice`
 is absent, so a green local run may still fail in CI — install LibreOffice or check the CI result.
 
