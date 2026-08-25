@@ -283,6 +283,20 @@ class TestSpeakerNotes(unittest.TestCase):
         self.assertEqual(ppt_utils.get_speaker_notes(roundtrip(pres).slides[0]),
                          "")
 
+    def test_clearing_a_slide_without_notes_adds_no_notes_part(self):
+        """slide.notes_slide creates the part on access, so a naive clear
+        would add an empty notesSlide (and a notesMaster) to the package."""
+        import zipfile
+
+        pres = build_deck(1)
+        ppt_utils.set_speaker_notes(pres.slides[0], "")
+        self.assertFalse(pres.slides[0].has_notes_slide)
+
+        buffer = io.BytesIO()
+        pres.save(buffer)
+        names = zipfile.ZipFile(buffer).namelist()
+        self.assertEqual([n for n in names if "notesSlide" in n], [])
+
     def test_notes_are_extracted_but_kept_out_of_the_slide_text(self):
         pres = build_deck(1)
         pres.slides[0].shapes.title.text = "On the slide"

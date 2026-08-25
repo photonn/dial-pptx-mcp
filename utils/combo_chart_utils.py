@@ -68,10 +68,15 @@ def _c(tag):
     return f"{{{_C}}}{tag}"
 
 
-def _new_ax_id():
-    # PowerPoint's own ids are large signed 32-bit values; any unique number
-    # works as long as the group and its axes agree.
-    return random.randint(100000000, 2000000000)
+def _new_ax_id(taken):
+    # PowerPoint's own ids are large signed 32-bit values; any number works as
+    # long as the group and its axes agree — and as long as it is not already
+    # in use, since two axes sharing an id wires a series to the wrong scale.
+    while True:
+        candidate = random.randint(100000000, 2000000000)
+        if candidate not in taken:
+            taken.add(candidate)
+            return candidate
 
 
 def _element(xml):
@@ -168,6 +173,8 @@ def apply_combo_layout(chart, series_specs):
             f"series specification(s) were given")
 
     primary_cat, primary_val = _primary_axis_ids(existing[0])
+    taken = {int(element.get("val"))
+             for element in plot_area.iter(_c("axId"))}
     secondary_ids = None
 
     # Preserve the caller's series order, and keep one group per distinct
@@ -187,7 +194,7 @@ def apply_combo_layout(chart, series_specs):
         kind, options = COMBO_SERIES_TYPES[key[0]]
         if key[1]:
             if secondary_ids is None:
-                secondary_ids = (_new_ax_id(), _new_ax_id())
+                secondary_ids = (_new_ax_id(taken), _new_ax_id(taken))
             ax_ids = secondary_ids
         else:
             ax_ids = (primary_cat, primary_val)

@@ -15,6 +15,7 @@ __all__ = [
     # Combo chart utilities
     "COMBO_SERIES_TYPES",
     "apply_combo_layout",
+    "value_axis_with_id",
     "set_series_color",
     "set_series_data_labels",
     "add_series_trendline",

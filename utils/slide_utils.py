@@ -344,5 +344,13 @@ def get_speaker_notes(slide):
 
 
 def set_speaker_notes(slide, text):
-    """Set (or clear, with "") a slide's speaker notes."""
+    """Set (or clear, with "") a slide's speaker notes.
+
+    Clearing a slide that has no notes is a no-op. `slide.notes_slide`
+    *creates* the part on access, so clearing would otherwise add an empty
+    notesSlide — and pull a notesMaster into the package with it — to every
+    slide it was pointed at.
+    """
+    if not (text or slide.has_notes_slide):
+        return
     slide.notes_slide.notes_text_frame.text = text or ""

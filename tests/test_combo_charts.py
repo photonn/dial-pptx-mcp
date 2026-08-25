@@ -10,6 +10,7 @@ import io
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -133,6 +134,31 @@ class TestComboLayout(unittest.TestCase):
         for pair in pairs:
             self.assertTrue(set(pair) <= declared,
                             "a group references an axis that is not declared")
+
+    def test_generated_axis_ids_never_collide_with_the_existing_ones(self):
+        """Two axes sharing an id wires a series to the wrong scale. The
+        generator is random, so force the collision to prove it is handled."""
+        pres = deck_with_slide()
+        chart = plain_chart(pres, 2)
+        plot_area = chart._chartSpace.find(qn("c:chart")).find(qn("c:plotArea"))
+        existing = [int(e.get("val")) for e in plot_area.iter(qn("c:axId"))]
+
+        # Hand out every id already in use, then one that is not.
+        queue = list(dict.fromkeys(existing)) * 2 + [123456789, 987654321]
+        with patch("utils.combo_chart_utils.random.randint",
+                   side_effect=queue):
+            layout = ppt_utils.apply_combo_layout(
+                chart, [{"type": "column"},
+                        {"type": "line", "secondary_axis": True}])
+
+        self.assertNotIn(layout["secondary"][0], existing)
+        self.assertNotIn(layout["secondary"][1], existing)
+        self.assertNotEqual(layout["secondary"][0], layout["secondary"][1])
+        ids = [int(e.get("val"))
+               for axis in list(plot_area.findall(qn("c:valAx")))
+               + list(plot_area.findall(qn("c:catAx")))
+               for e in [axis.find(qn("c:axId"))]]
+        self.assertEqual(len(ids), len(set(ids)), "duplicate axis id declared")
 
     def test_series_of_one_type_stay_in_one_group(self):
         pres = deck_with_slide()
@@ -335,6 +361,22 @@ class TestFormatSeriesTool(TestComboChartTool):
         result = self.format(0, 0, 0, color=[300, 0, 0],
                              presentation_id=self.pid)
         self.assertIn("0-255", result["error"])
+
+
+class TestPackageExports(unittest.TestCase):
+    """utils re-exports its modules flat; a name missing from the package's
+    own __all__ is invisible to `from utils import *` even though it imports
+    fine by attribute."""
+
+    def test_every_helper_of_the_new_modules_is_re_exported(self):
+        import utils
+        from utils import combo_chart_utils, slide_utils
+
+        for module in (combo_chart_utils, slide_utils):
+            for name in module.__all__:
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertIn(name, utils.__all__)
+                    self.assertTrue(hasattr(utils, name))
 
 
 if __name__ == "__main__":
