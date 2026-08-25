@@ -14,6 +14,12 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | State | process globals, guessable sequential IDs | per-deck UUID handles (unguessable), thread-safe store with TTL + LRU bounds, per-deck locking |
 | File I/O | local disk paths | DIAL Files API: template in via Quick Apps `file:data::` references, deck out via `export_presentation` returning a DIAL file URL |
 | Images | local path or base64 | `add_image_from_dial_url` fetches orchestrator-generated images from DIAL storage server-side, with aspect-ratio-aware placement |
+| Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations` — python-pptx has no API for any of these |
+| Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
+| Validation | none | `validate_presentation`: package, relationship, geometry, chart, table and placeholder-text checks, folded into export |
+| Design | — | `get_design_guidance` (deck design as a document the agent reads) and `render_slide_previews` (see the template before building on it) |
+| Charts | one type, one axis per chart | `add_combo_chart` (mixed series types, secondary value axis) and `format_chart_series` (colour, labels, trendlines) |
+| Output | `.pptx` | `.pptx`, `.pdf`, or both; PowerPoint 97-2003 `.ppt` accepted as input |
 | Deployment | — | Dockerfile (non-root, HTTP defaults) + generic Kubernetes example |
 
 The ~30 upstream content/formatting tools (slides, text, charts, tables, connectors, hyperlinks, masters, transitions) are unchanged — see [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) for the full tool reference.
@@ -146,6 +152,64 @@ Two consequences worth knowing. **Pass the URL exactly as received, in that para
 
 Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
 
+## Building a deck
+
+These tools cover the parts of deck construction upstream had no route to.
+
+### Slide structure
+
+python-pptx's only entry point is `slides.add_slide(layout)`, which appends a bare slide built from a layout. A corporate template's *designed* slides — its artwork, panels, logo placement, the three-card row someone laid out — live on the slides themselves and cannot be reached that way.
+
+| Tool | What it does |
+|---|---|
+| `duplicate_slide(presentation_id, slide_index, insert_after?, count?)` | Copies a slide with all of its content and formatting. Pictures are shared (same bytes); charts, SmartArt and embedded objects are cloned, so editing the copy's chart does not rewrite the original's. Speaker notes travel with it |
+| `delete_slide(presentation_id, slide_index)` | Removes a slide and its package relationship |
+| `move_slide(presentation_id, slide_index, new_index)` | Reorders |
+| `copy_slide_between_presentations(source, slide_index, target, ...)` | Merges decks. Everything the slide references is cloned into the target package; inherited theme colours and fonts re-resolve against the *target* master, so the copy is worth inspecting |
+| `manage_speaker_notes(presentation_id, operation, slide_index?, text?)` | `get` / `set` / `clear`. Notes belong in the notes pane — a "notes" textbox is visible to the audience |
+
+The recommended flow for template work is **duplicate, then fill**: find the template slide whose structure fits the content, duplicate it, and replace the text.
+
+### Structural validation
+
+`validate_presentation(presentation_id, min_severity?)` is the axis visual QA cannot see. A deck with a dangling relationship or a chart with no series renders in LibreOffice and opens in python-pptx — the two things the visual pass relies on — and still arrives broken.
+
+It checks the package (round-trip, content types, relationship resolution, slide ids, notes parts shared between slides, orphan parts) and the slides (shapes off the canvas or zero-sized, charts with no data or mismatched series lengths, empty tables, pictures stretched off their aspect ratio, leftover placeholder text such as `Lorem ipsum` / `Click to add title` / `TODO` / `[insert ...]`). Each problem names the slide, the shape, what is wrong and the tool that fixes it.
+
+Severities: `error` (PowerPoint may refuse the file), `warning` (a defect the user would notice), `info` (advisories — notably the font caveat below). It runs on every export too, as a non-blocking `"structure"` summary, and it is fast: no rendering, no model call.
+
+Empty placeholders are deliberately **not** reported: PowerPoint draws their prompt text only in edit view, so they are invisible in a slideshow and in the PDF, and a template has dozens.
+
+### Design guidance
+
+`get_design_guidance(section?)` serves [docs/DESIGN_GUIDANCE.md](docs/DESIGN_GUIDANCE.md) — deck structure, layout and spacing, type scale, colour, charts and tables, images, the visual habits that make a deck read as machine-generated, and the build loop. Call it with no argument for the whole document plus the section list, or name a section (`type`, `colour`, `layout`, …) mid-build.
+
+Its first section is the one that matters most here: this server's default case is a corporate template, so the right move is to **inherit** the user's design and duplicate their slides, not to invent a palette over the top of their brand.
+
+### Slide previews
+
+`render_slide_previews(presentation_id, slides?, describe?, columns?)` renders the deck into labelled contact sheets, uploads them to DIAL storage (so a person can look at them), and — since the agent cannot see an image — has the vision model describe what each slide is structurally suited to. Use it right after opening a template: layout names and indices cannot tell you which of eight near-identical layouts holds the three-card row. Registered only where LibreOffice is present.
+
+### Charts
+
+`add_chart` builds one chart group: every series the same type, on one value axis. `add_combo_chart` covers what that cannot — bars with a target line across them, or two measures whose units differ so much that one flattens to nothing on a shared axis:
+
+```json
+{"categories": ["Q1", "Q2", "Q3"],
+ "series": [
+   {"name": "Revenue", "values": [10, 12, 15], "type": "column", "color": [31, 73, 125]},
+   {"name": "Margin",  "values": [0.21, 0.23, 0.22], "type": "line_markers",
+    "secondary_axis": true, "number_format": "0.0%", "data_labels": true}]}
+```
+
+The result is a real editable PowerPoint chart, not a picture — the embedded workbook and category caches are preserved. `format_chart_series` restyles one series of any existing chart: brand colour, data labels and their position, number format, trendline (`linear`, `movingAvg`, `exp`, `log`, `poly`, `power`).
+
+### Output formats
+
+`export_presentation(presentation_id, filename?, format?)` takes `format="pptx"` (default), `"pdf"`, or `"both"` — the pair is usually what a user asking to "share" a deck wants. The `.pptx` stays first in `files` and in the flat `file_url`. A PDF that cannot be rendered is reported as a note beside the delivered deck rather than a failed export.
+
+`create_presentation_from_template_content` accepts a PowerPoint 97-2003 `.ppt` and converts it on the way in. Both conversions need LibreOffice.
+
 ## Visual QA (agent-driven inspect and repair)
 
 When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools the orchestrating agent calls whenever it wants — typically right after building each slide, not only at the end:
@@ -186,16 +250,37 @@ Overlapping or unreadable text is graded at least `major`, so it fails the verdi
 
 The repair engine can act on all of it: `describe_slides` hands the planner each table's column widths, row heights and cell text, and each chart's type, categories, series count and label/legend state — so a plan can widen a column, raise a row, retitle a cell, shrink a whole table's or chart's font, hide crowded data labels, or move the legend, instead of only nudging the container. Members of a group are not individually addressable; the group is moved, resized or shrunk as a whole.
 
+### Fonts, and what a QA verdict can prove
+
+The renderer is LibreOffice, which does not have Microsoft's fonts and substitutes its own. Some substitutions are *metric-compatible* — identical character widths, so a line that wraps in the render wraps identically in PowerPoint:
+
+| Font in the deck | Rendered as | Text-fit verdict |
+|---|---|---|
+| Arial, Helvetica | Liberation Sans | exact |
+| Times New Roman | Liberation Serif | exact |
+| Courier New | Liberation Mono | exact |
+| Calibri | Carlito | exact |
+| Cambria | Caladea | exact |
+
+Everything else (Georgia, Verdana, Trebuchet MS, Segoe UI, Garamond, Consolas, …) is substituted by similarity, and the widths differ — so a QA screenshot can show text overflowing a box that fits in PowerPoint, or fitting one that will not.
+
+The server handles this rather than ignoring it: `validate_presentation` reports a deck's non-metric fonts as an `info` problem, and the review prompt carries a caveat telling the reviewer to report only clear, substantial overflow for text in those fonts and to judge everything else normally. In template mode this is a note on how to read the results, not a defect — the brand's fonts win.
+
 ### Telling the agent to use it
 
 Nothing forces the orchestrator to inspect: with the export gate off, `export_presentation` reports `"visual_qa": "unverified"` but still succeeds. Put the workflow in the Quick App's system prompt so QA actually happens:
 
 ```text
+Before planning the deck, call get_design_guidance. If the user supplied a
+template, call render_slide_previews to see its slides, and build by
+duplicating the template slides that fit your content (duplicate_slide)
+rather than adding bare ones.
 After you finish building each slide, call visual_inspect_slides with that
 slide's number. If it reports issues, call visual_repair_slides for the same
 slide and continue only once it passes or you have fixed the content yourself.
-Before export_presentation, call visual_inspect_slides once with no slides
-argument to check the deck as a whole. If the export response says
+Before export_presentation, call validate_presentation and fix any errors it
+reports, then call visual_inspect_slides once with no slides argument to check
+the deck as a whole. If the export response says
 "visual_qa": "unverified", say so in your answer rather than presenting the
 deck as checked.
 ```

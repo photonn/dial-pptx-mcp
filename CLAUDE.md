@@ -49,6 +49,49 @@ server and injected as arguments — that is why tool modules take long paramete
 regex, not `tomllib`, because CI still runs 3.10) and the tool count from the live registry, since registration is dynamic.
 Don't reintroduce hardcoded versions or counts there — the upstream ones were both wrong by the time anyone noticed.
 
+**Slide structure (`utils/slide_utils.py`, `tools/slide_tools.py`).** python-pptx's only entry point is
+`slides.add_slide(layout)`, so delete/move/duplicate/cross-deck-copy are implemented at the OPC level: `<p:sldIdLst>`
+edits for delete and move, and for duplication a deepcopy of the slide XML plus a rebuilt relationship set that
+**preserves the source's rIds** (the copied XML still carries them, so `rels.get_or_add`'s own numbering would break
+every `r:embed`). Image/media/font parts are shared, chart/SmartArt/embedded parts are cloned — otherwise
+`update_chart_data` on a copy rewrites the original's chart. `cSld` and `spTree` are emptied and refilled rather than
+replaced: python-pptx binds a slide's `shapes` collection to the spTree *element* on first access, and `add_slide`
+touches it while cloning layout placeholders, so swapping the element out silently detaches every later edit. The
+notesSlide rel is never copied (one notes part per slide); the notes text is transferred instead. **The intended
+template flow is duplicate-then-fill**, not `add_slide` — a layout holds placeholders, not the template's artwork.
+
+**Structural validation (`deck_validation.py`, `tools/validation_tools.py`).** The axis visual QA cannot see: a deck
+with a dangling rId renders in LibreOffice and opens in python-pptx and still fails in PowerPoint. Severities are
+`error` (file may not open) / `warning` (user-visible defect) / `info` (advisory), every problem carries a `fix` naming
+the tool that resolves it, and `_structure_summary` folds it into export **without blocking** — refusing to deliver a
+finished deck over a warning costs the user more than the warning does. Empty placeholders are deliberately not
+reported: PowerPoint draws their prompt text only in edit view, and flagging all 68 of them on the demo fixture buried
+the two real findings.
+
+**Fonts (`fonts.py`).** Visual QA renders through LibreOffice, so its text-fit verdicts are only trustworthy for fonts
+with metric-compatible substitutes (Liberation Sans/Serif/Mono, Carlito, Caladea). Everything else is substituted by
+similarity and the widths differ. `unreliable_fonts_in` drives both an `info` problem in validation and a caveat
+appended to `REVIEW_PROMPT`, telling the reviewer to report only substantial overflow for text in those fonts. Do not
+"fix" a template's fonts to satisfy QA — brand beats QA precision, which is what the caveat exists to make possible.
+
+**Design guidance (`docs/DESIGN_GUIDANCE.md`, `tools/guidance_tools.py`).** The tools answer "how do I place this";
+nothing answered "what should this slide look like". The document is the single source of truth (read from disk,
+mtime-cached, split on its own `## N. Title` headings) and is served whole or by section, so it costs nothing until a
+caller is building. Its premise is that template mode is the default: inherit the user's design, don't invent one over
+it. Keep it consistent with the tool names it references.
+
+**Previews (`previews.py`, `tools/preview_tools.py`).** Contact sheets for choosing a template slide. The agent cannot
+look at an image, so the vision-model description is the part it can act on and the uploaded sheet is for the person;
+an upload failure must not lose the descriptions. Registered only when `soffice` exists.
+
+**Combo charts (`utils/combo_chart_utils.py`).** A plot area holds a *list* of chart-group elements, each naming its
+axis pair, so `add_combo_chart` builds an ordinary single-type chart with every series (that is what writes a correct
+embedded workbook and the shared category caches) and then redistributes the `c:ser` elements into per-(type, axis)
+groups, adding a hidden `catAx` and a right-hand `valAx` when a secondary axis is asked for. Never fall back to a
+rendered image: visual repair can only move or delete a picture. **Address value axes by id** — python-pptx's
+`chart.value_axis` returns the *second* `valAx` when a chart has two (it assumes a scatter chart), so titling "the
+value axis" puts the left axis' title on the right-hand one.
+
 **Two unrelated meanings of "template".** (1) A corporate `.pptx`/`.potx` file that *becomes* the presentation, preserving
 theme/masters/layouts byte-for-byte — `create_presentation_from_template{,_content}` in `tools/presentation_tools.py`, with
 `.potx` handled by content-type coercion in `utils/presentation_utils.py`. (2) `slide_layout_templates.json` — 23
@@ -95,6 +138,10 @@ Slide scoping runs through the whole stack and must stay consistent: LibreOffice
 subset only selects pages to rasterize; `image_slides` maps images back to absolute slide numbers for `plan_repairs`; and
 `apply_repairs(..., allowed_slides=)` drops operations aimed at slides outside the scope. Issue slide numbers reported to
 the agent are always absolute, which is what the `review_prompt(..., slides=)` mapping note buys.
+
+`convert_with_soffice` is the single LibreOffice entry point (PDF export, legacy `.ppt` import, and the QA renderer all
+go through it). It owns the isolated `-env:UserInstallation` profile, which is what stops concurrent conversions
+fighting over the shared profile lock — a failure that shows up under load, not in tests.
 
 `_visual_qa_gate` in `tools/presentation_tools.py` is the **optional** legacy behaviour (`VISUAL_QA_EXPORT_GATE=true`,
 off by default); with it off, export just reports `visual_qa: passed|unverified|unavailable` from the store's dirty flag.

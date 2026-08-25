@@ -296,5 +296,20 @@ class TestSpeakerNotes(unittest.TestCase):
                       result["text_content"]["all_text_combined"])
 
 
+class TestDirtyMarking(unittest.TestCase):
+    """Speaker notes are not rendered, so they must not cost a re-inspection."""
+
+    def test_speaker_notes_do_not_invalidate_a_visual_pass(self):
+        import state
+        self.assertIn("manage_speaker_notes", state._NON_EDITING_TOOLS)
+
+    def test_slide_structure_tools_do_invalidate_it(self):
+        import state
+        for name in ("duplicate_slide", "delete_slide", "move_slide",
+                     "copy_slide_between_presentations"):
+            with self.subTest(tool=name):
+                self.assertNotIn(name, state._NON_EDITING_TOOLS)
+
+
 if __name__ == "__main__":
     unittest.main()

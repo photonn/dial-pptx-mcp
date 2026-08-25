@@ -136,8 +136,14 @@ class PresentationStore(MutableMapping):
 # Tools that must not re-flag a passed deck as needing inspection: exports,
 # and the visual QA tools — visual_repair_slides does edit the deck, but it
 # re-inspects what it edited and manages the flag itself.
+#
+# manage_speaker_notes is here because the flag tracks *visual* staleness and
+# notes are never rendered on a slide: writing them cannot invalidate a
+# passing inspection, and marking the deck dirty would cost a whole re-review
+# for text the audience never sees.
 _NON_EDITING_TOOLS = {"export_presentation", "save_presentation",
-                      "visual_inspect_slides", "visual_repair_slides"}
+                      "visual_inspect_slides", "visual_repair_slides",
+                      "manage_speaker_notes"}
 
 
 def _elapsed_ms(started):
