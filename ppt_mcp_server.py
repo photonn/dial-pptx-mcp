@@ -39,12 +39,35 @@ from tools import (
     register_master_tools,
     register_transition_tools,
     register_visual_tools,
-    register_image_tools
+    register_image_tools,
+    register_slide_tools,
+    register_validation_tools,
+    register_guidance_tools,
+    register_preview_tools
 )
 
 # Initialize the FastMCP server
 app = FastMCP(
-    name="ppt-mcp-server"
+    name="ppt-mcp-server",
+    # Surfaced to the client on initialize. Kept to a pointer rather than the
+    # advice itself: the full guidance is a few pages, and get_design_guidance
+    # serves it (whole or by section) only to a caller that is actually
+    # building a deck.
+    instructions=(
+        "Builds PowerPoint decks, usually from a corporate template. Every "
+        "tool takes an explicit presentation_id — there is no current "
+        "presentation.\n"
+        "Before planning a deck, call get_design_guidance: it covers deck "
+        "structure, layout, type and colour, and how to work with a supplied "
+        "template rather than over it.\n"
+        "While building, inspect each slide you finish with "
+        "visual_inspect_slides(slides=[n]). Before exporting, run "
+        "validate_presentation for structural faults and visual_repair_slides "
+        "for appearance; they check different things. Deliver the deck with "
+        "export_presentation and give the user the file URL it returns, then "
+        "call render_deck_summary_card and attach its image so the user can "
+        "see the finished deck without opening the file."
+    ),
 )
 
 # Presentation state: concurrency-safe, UUID-handle store (see state.py).
@@ -309,6 +332,26 @@ register_visual_tools(
 )
 
 register_image_tools(
+    app,
+    presentations
+)
+
+register_slide_tools(
+    app,
+    presentations
+)
+
+register_validation_tools(
+    app,
+    presentations
+)
+
+register_guidance_tools(
+    app,
+    presentations
+)
+
+register_preview_tools(
     app,
     presentations
 )

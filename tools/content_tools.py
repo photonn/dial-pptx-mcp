@@ -117,7 +117,7 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         ),
     )
     def extract_slide_text(slide_index: int, presentation_id: Optional[str] = None) -> Dict:
-        """Extract all text content from a specific slide."""
+        """Extract all text content from a specific slide, speaker notes included."""
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:
@@ -150,7 +150,15 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         ),
     )
     def extract_presentation_text(presentation_id: Optional[str] = None, include_slide_info: bool = True) -> Dict:
-        """Extract all text content from all slides in the presentation."""
+        """Extract all text content from all slides in the presentation.
+
+        Use this as the content-QA read on a finished deck: check for missing
+        or duplicated sections, typos, wrong order, and — on a deck built from
+        a template — placeholder text the template shipped with that was never
+        replaced ("Lorem ipsum", "Click to add title", "XXX", "[insert ...]").
+        Speaker notes come back in each slide's "speaker_notes" but are kept
+        out of "all_text_combined", which holds only what the audience sees.
+        """
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:
@@ -163,6 +171,7 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         try:
             slides_text = []
             total_text_shapes = 0
+            slides_with_notes = 0
             slides_with_tables = 0
             slides_with_titles = 0
             all_presentation_text = []
@@ -182,6 +191,7 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
                         slide_data["total_text_shapes"] = slide_text_result["total_text_shapes"]
                         slide_data["has_title"] = slide_text_result["has_title"]
                         slide_data["has_tables"] = slide_text_result["has_tables"]
+                        slide_data["has_notes"] = slide_text_result.get("has_notes", False)
                     
                     slides_text.append(slide_data)
                     
@@ -189,6 +199,8 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
                     total_text_shapes += slide_text_result["total_text_shapes"]
                     if slide_text_result["has_tables"]:
                         slides_with_tables += 1
+                    if slide_text_result.get("has_notes"):
+                        slides_with_notes += 1
                     if slide_text_result["has_title"]:
                         slides_with_titles += 1
                     
@@ -212,6 +224,7 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
                 "total_text_shapes": total_text_shapes,
                 "slides_with_titles": slides_with_titles,
                 "slides_with_tables": slides_with_tables,
+                "slides_with_notes": slides_with_notes,
                 "slides_text": slides_text,
                 "all_presentation_text_combined": "\n".join(all_presentation_text)
             }

@@ -12,6 +12,10 @@ from state import short_id
 
 logger = get_logger("tools.presentation")
 
+# Compound File Binary header — the container PowerPoint 97-2003 (.ppt) uses.
+# python-pptx reads OOXML only, so these are converted on the way in.
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
 
 def _visual_qa_gate(presentations, pres_id):
     """Optional export gate (VISUAL_QA_EXPORT_GATE=true).
@@ -79,6 +83,59 @@ def _visual_qa_gate(presentations, pres_id):
         if key in outcome:
             refusal[key] = outcome[key]
     return refusal
+
+
+def _export_pdf(client, pres, blob, stem):
+    """Render the deck to PDF and upload it; -> (file_entry, error_message).
+
+    Never raises: a PDF is a convenience next to the .pptx, and losing the
+    renderer must not cost the user the deck itself. The caller decides
+    whether the failure is fatal (format="pdf") or a note (format="both").
+    """
+    from dial_client import PDF_MIME
+
+    try:
+        import visual_qa
+        pdf = visual_qa.render_pptx_bytes_to_pdf(blob)
+    except Exception as e:
+        logger.warning("export_pdf_failed slides=%d error=%s",
+                       len(pres.slides), e)
+        return None, (
+            f"The deck could not be converted to PDF ({e}). PDF export needs "
+            "LibreOffice on the server; the .pptx is unaffected."
+        )
+    try:
+        return {
+            "file_url": client.upload(pdf, f"{stem}.pdf",
+                                      content_type=PDF_MIME),
+            "mime_type": PDF_MIME,
+            "size_bytes": len(pdf),
+            "format": "pdf",
+        }, None
+    except Exception as e:
+        logger.warning("export_pdf_upload_failed bytes=%d error=%s",
+                       len(pdf), e)
+        return None, f"The PDF was rendered but could not be stored ({e})."
+
+
+def _structure_summary(pres, blob):
+    """Cheap structural check folded into every export.
+
+    Export is the last moment anything can be caught, and the check needs no
+    renderer and no model call, so it runs unconditionally — but it never
+    blocks: refusing to deliver a finished deck over a warning costs the user
+    more than the warning does. A failure of the checker itself is reported as
+    "unavailable" rather than raised, for the same reason.
+    """
+    try:
+        import deck_validation
+        report = deck_validation.validate_presentation(pres, blob)
+        return {"validated": True,
+                "errors": report["counts"]["error"],
+                "warnings": report["counts"]["warning"]}
+    except Exception as e:
+        logger.warning("export_structure_check_failed error=%s", e)
+        return {"validated": False, "note": "structural check unavailable"}
 
 
 def _visual_qa_status(presentations, pres_id):
@@ -309,8 +366,11 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
     def create_presentation_from_template_content(template_content: str) -> Dict:
         """Create a new presentation from an uploaded .pptx template file.
 
-        template_content: the .pptx template file content, as a data: URI or a
-        base64-encoded string (in DIAL Quick Apps, pass the template file as
+        A PowerPoint 97-2003 (.ppt) file is accepted too and converted to
+        .pptx on the way in, where the server has LibreOffice.
+
+        template_content: the .pptx/.potx/.ppt template file content, as a
+        data: URI or a base64-encoded string (in DIAL Quick Apps, pass the template file as
         file:data::files/{bucket}/{path} and it is resolved automatically).
 
         The template's theme, layouts, masters and branding are preserved.
@@ -335,6 +395,23 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                          "template as a data: URI or base64 string (in DIAL "
                          "Quick Apps: file:data::<dial file path>)."
             }
+        converted_from = None
+        if raw.startswith(OLE_MAGIC):
+            # PowerPoint 97-2003. python-pptx reads OOXML only, so a legacy
+            # deck has to be converted before anything else can touch it.
+            try:
+                import visual_qa
+                raw = visual_qa.convert_legacy_ppt(raw)
+                converted_from = "ppt"
+            except Exception as e:
+                logger.warning("template_convert_failed reason=legacy_ppt "
+                               "error=%s", e)
+                return {
+                    "error": "template_content is a PowerPoint 97-2003 (.ppt) "
+                             f"file, which this server could not convert ({e}). "
+                             "Converting it needs LibreOffice on the server. "
+                             "Re-save the file as .pptx and try again."
+                }
         if not raw.startswith(b"PK"):
             logger.warning("template_decode_failed reason=not_ooxml bytes=%d",
                            len(raw))
@@ -358,12 +435,20 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         logger.info("template_loaded source=upload bytes=%d presentation_id=%s "
                     "slides=%d layouts=%d", len(raw), short_id(id),
                     len(pres.slides), len(pres.slide_layouts))
-        return {
+        result = {
             "presentation_id": id,
             "message": f"Created new presentation from uploaded template with ID: {id}",
             "slide_count": len(pres.slides),
             "layout_count": len(pres.slide_layouts)
         }
+        if converted_from:
+            result["converted_from"] = converted_from
+            result["conversion_note"] = (
+                "This was a PowerPoint 97-2003 (.ppt) file, converted to .pptx "
+                "on the way in. Conversion is approximate — check the layouts "
+                "with render_slide_previews before building on them."
+            )
+        return result
 
     @app.tool(
         annotations=ToolAnnotations(
@@ -404,11 +489,19 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Export Presentation to DIAL Files",
         ),
     )
-    def export_presentation(presentation_id: str, filename: str = "presentation.pptx") -> Dict:
+    def export_presentation(presentation_id: str,
+                            filename: str = "presentation.pptx",
+                            format: str = "pptx") -> Dict:
         """Export the presentation to DIAL file storage and return its file URL.
 
         Use this (not save_presentation) to deliver the finished deck to the
-        user. Export does NOT run visual QA for you: inspect the deck with
+        user.
+
+        format: "pptx" (default) for the editable deck; "pdf" for a read-only
+        copy; "both" to deliver the pair, which is what a user who asked to
+        "share" or "send" a deck usually wants. PDF is produced by rendering
+        the deck through LibreOffice, so it needs the renderer and reflects
+        that renderer's fonts — see get_design_guidance("type"). Export does NOT run visual QA for you: inspect the deck with
         visual_inspect_slides / visual_repair_slides while you build it, or
         at least once before exporting. The response carries "visual_qa":
         "passed" | "unverified" | "unavailable" so you can tell whether the
@@ -429,28 +522,66 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
 
         pres = presentations[presentation_id]
 
-        if not filename.lower().endswith(".pptx"):
-            filename += ".pptx"
+        if format not in ("pptx", "pdf", "both"):
+            return {"error": f"Invalid format: {format}. Must be 'pptx', "
+                             f"'pdf' or 'both'."}
+
+        stem = filename[:-5] if filename.lower().endswith(".pptx") else filename
+        if stem.lower().endswith(".pdf"):
+            stem = stem[:-4]
+        if not stem:
+            return {"error": "filename must not be empty."}
 
         try:
             import io
             buf = io.BytesIO()
             pres.save(buf)
+            blob = buf.getvalue()
+            structure = _structure_summary(pres, blob)
             client = DialFileClient()
-            file_url = client.upload(buf.getvalue(), filename)
+
+            files = []
+            pdf_error = None
+            if format in ("pptx", "both"):
+                files.append({
+                    "file_url": client.upload(blob, f"{stem}.pptx"),
+                    "mime_type": PPTX_MIME,
+                    "size_bytes": len(blob),
+                    "format": "pptx",
+                })
+            if format in ("pdf", "both"):
+                pdf_file, pdf_error = _export_pdf(client, pres, blob, stem)
+                if pdf_file:
+                    files.append(pdf_file)
+                elif format == "pdf":
+                    return {"error": pdf_error}
+
             qa_status = _visual_qa_status(presentations, presentation_id)
-            logger.info("export_ok presentation_id=%s filename=%s slides=%d "
-                        "bytes=%d visual_qa=%s", short_id(presentation_id),
-                        filename, len(pres.slides), buf.getbuffer().nbytes,
-                        qa_status)
+            primary = files[0]
+            urls = ", ".join(f["file_url"] for f in files)
+            logger.info("export_ok presentation_id=%s filename=%s format=%s "
+                        "slides=%d bytes=%d visual_qa=%s",
+                        short_id(presentation_id), stem, format,
+                        len(pres.slides), len(blob), qa_status)
             result = {
-                "message": f"Presentation exported to DIAL file storage: {file_url}. "
-                           "Include this file URL in your final answer.",
-                "file_url": file_url,
-                "mime_type": PPTX_MIME,
-                "size_bytes": buf.getbuffer().nbytes,
+                "message": f"Presentation exported to DIAL file storage: {urls}. "
+                           "Include the file URL(s) in your final answer.",
+                "file_url": primary["file_url"],
+                "mime_type": primary["mime_type"],
+                "size_bytes": primary["size_bytes"],
+                "files": files,
                 "visual_qa": qa_status,
+                "structure": structure,
             }
+            if format == "both" and len(files) == 1:
+                result["pdf_note"] = pdf_error
+            if structure.get("errors"):
+                result["structure_note"] = (
+                    f"The exported deck has {structure['errors']} structural "
+                    "error(s) that may stop it opening in PowerPoint. The "
+                    "file was uploaded regardless; call "
+                    "validate_presentation for the details and fixes."
+                )
             if qa_status == "unverified":
                 result["visual_qa_note"] = (
                     "This deck was never visually inspected, or was edited "

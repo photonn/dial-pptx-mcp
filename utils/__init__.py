@@ -8,8 +8,28 @@ from .presentation_utils import *
 from .content_utils import *
 from .design_utils import *
 from .validation_utils import *
+from .slide_utils import *
+from .combo_chart_utils import *
 
 __all__ = [
+    # Combo chart utilities
+    "COMBO_SERIES_TYPES",
+    "apply_combo_layout",
+    "value_axis_with_id",
+    "set_series_color",
+    "set_series_data_labels",
+    "add_series_trendline",
+    "TRENDLINE_TYPES",
+
+    # Slide structure utilities
+    "delete_slide",
+    "move_slide",
+    "duplicate_slide",
+    "copy_slide_to_presentation",
+    "get_speaker_notes",
+    "set_speaker_notes",
+    "check_index",
+
     # Core utilities
     "safe_operation",
     "try_multiple_approaches",

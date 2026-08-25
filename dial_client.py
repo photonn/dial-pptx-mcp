@@ -40,6 +40,7 @@ from logging_utils import get_logger
 logger = get_logger("dial_client")
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+PDF_MIME = "application/pdf"
 
 
 class DialConfigError(RuntimeError):

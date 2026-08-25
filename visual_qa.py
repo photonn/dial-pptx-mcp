@@ -31,6 +31,7 @@ from pathlib import Path
 
 import httpx
 
+import fonts
 from logging_utils import get_logger, flatten
 
 logger = get_logger("visual_qa")
@@ -53,6 +54,61 @@ def _soffice_binary():
     return path
 
 
+def convert_with_soffice(data: bytes, source_suffix: str, target: str,
+                         timeout: float = 180.0) -> bytes:
+    """Run one headless LibreOffice conversion and return the output bytes.
+
+    `source_suffix` is the input file's extension (".pptx", ".ppt"); `target`
+    is LibreOffice's --convert-to argument ("pdf", "pptx"). Every caller here
+    goes through this: the isolated user profile is what stops concurrent
+    conversions fighting over the shared profile lock, and getting that wrong
+    fails intermittently under load rather than in testing.
+    """
+    with tempfile.TemporaryDirectory(prefix="pptx-convert-") as tmp:
+        tmp = Path(tmp)
+        src = tmp / f"deck{source_suffix}"
+        src.write_bytes(data)
+        profile = tmp / "lo-profile"
+        cmd = [
+            _soffice_binary(), "--headless", "--norestore",
+            f"-env:UserInstallation=file://{profile}",
+            "--convert-to", target, "--outdir", str(tmp), str(src),
+        ]
+        started = time.monotonic()
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        # --convert-to may take a filter suffix ("pdf:impress_pdf_Export");
+        # the file it writes is named after the bare extension.
+        out = tmp / f"deck.{target.split(':', 1)[0]}"
+        if proc.returncode != 0 or not out.exists():
+            logger.error("convert_failed stage=libreoffice target=%s "
+                         "returncode=%d bytes=%d stderr=%s", target,
+                         proc.returncode, len(data),
+                         flatten(proc.stderr.decode(errors="replace")[-300:]))
+            raise VisualQAError(
+                f"LibreOffice failed to convert the presentation to {target}: "
+                + proc.stderr.decode(errors="replace")[-500:]
+            )
+        result = out.read_bytes()
+        logger.debug("convert_ok target=%s in_bytes=%d out_bytes=%d "
+                     "duration_ms=%d", target, len(data), len(result),
+                     int((time.monotonic() - started) * 1000))
+        return result
+
+
+def render_pptx_bytes_to_pdf(pptx_data: bytes) -> bytes:
+    """Convert presentation bytes to PDF bytes."""
+    return convert_with_soffice(pptx_data, ".pptx", "pdf")
+
+
+def convert_legacy_ppt(data: bytes) -> bytes:
+    """Convert a binary PowerPoint 97-2003 (.ppt) file to .pptx bytes.
+
+    python-pptx reads only OOXML, so a legacy deck has to be converted before
+    anything else in this server can touch it.
+    """
+    return convert_with_soffice(data, ".ppt", "pptx")
+
+
 def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
                               max_slides: int = None,
                               slides: list = None) -> list:
@@ -65,49 +121,28 @@ def render_pptx_bytes_to_pngs(pptx_data: bytes, dpi: int = 96,
     """
     import pymupdf
 
-    with tempfile.TemporaryDirectory(prefix="pptx-visual-qa-") as tmp:
-        tmp = Path(tmp)
-        src = tmp / "deck.pptx"
-        src.write_bytes(pptx_data)
-        # Isolated LibreOffice profile so concurrent renders don't fight
-        # over the shared user profile lock.
-        profile = tmp / "lo-profile"
-        cmd = [
-            _soffice_binary(), "--headless", "--norestore",
-            f"-env:UserInstallation=file://{profile}",
-            "--convert-to", "pdf", "--outdir", str(tmp), str(src),
-        ]
-        started = time.monotonic()
-        proc = subprocess.run(cmd, capture_output=True, timeout=180)
-        pdf = tmp / "deck.pdf"
-        if proc.returncode != 0 or not pdf.exists():
-            logger.error("render_failed stage=libreoffice returncode=%d bytes=%d "
-                         "stderr=%s", proc.returncode, len(pptx_data),
-                         flatten(proc.stderr.decode(errors="replace")[-300:]))
-            raise VisualQAError(
-                "LibreOffice failed to render the presentation: "
-                + proc.stderr.decode(errors="replace")[-500:]
-            )
-        images = []
-        with pymupdf.open(pdf) as doc:
-            page_count = doc.page_count
-            if slides is None:
-                wanted = list(range(1, page_count + 1))
-            else:
-                wanted = [n for n in slides if 1 <= n <= page_count]
-            if max_slides is not None:
-                wanted = wanted[:max_slides]
-            for number in wanted:
-                pix = doc[number - 1].get_pixmap(dpi=dpi)
-                images.append(pix.tobytes("png"))
-        if slides is None and page_count > len(images):
-            logger.warning("render_truncated rendered=%d slides=%d cap=%s "
-                           "hint=raise_VISION_LLM_MAX_SLIDES",
-                           len(images), page_count, max_slides)
-        logger.debug("render_ok slides=%d of=%d dpi=%d duration_ms=%d",
-                     len(images), page_count, dpi,
-                     int((time.monotonic() - started) * 1000))
-        return images
+    started = time.monotonic()
+    images = []
+    with pymupdf.open(stream=render_pptx_bytes_to_pdf(pptx_data),
+                      filetype="pdf") as doc:
+        page_count = doc.page_count
+        if slides is None:
+            wanted = list(range(1, page_count + 1))
+        else:
+            wanted = [n for n in slides if 1 <= n <= page_count]
+        if max_slides is not None:
+            wanted = wanted[:max_slides]
+        for number in wanted:
+            pix = doc[number - 1].get_pixmap(dpi=dpi)
+            images.append(pix.tobytes("png"))
+    if slides is None and page_count > len(images):
+        logger.warning("render_truncated rendered=%d slides=%d cap=%s "
+                       "hint=raise_VISION_LLM_MAX_SLIDES",
+                       len(images), page_count, max_slides)
+    logger.debug("render_ok slides=%d of=%d dpi=%d duration_ms=%d",
+                 len(images), page_count, dpi,
+                 int((time.monotonic() - started) * 1000))
+    return images
 
 
 def normalize_slides(pres, slides):
@@ -461,7 +496,8 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
     ref_images = _render_deck(reference_pres, _slide_cap()) \
         if reference_pres is not None else []
 
-    prompt = review_prompt(bool(ref_images), focus, slides)
+    prompt = review_prompt(bool(ref_images), focus, slides,
+                           fonts.unreliable_fonts_in(pres))
     if ref_images:
         prompt += (
             f"\nImage order: images 1-{len(ref_images)} are the reference "
@@ -502,6 +538,9 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10"))
     max_iterations = max(1, max_iterations)
 
+    # Constant for the whole loop: repairs never change which fonts the deck
+    # names, and re-scanning per round would only cost time.
+    risky_fonts = fonts.unreliable_fonts_in(pres)
     repair_rounds = []
     verdict = {}
     loop_started = time.monotonic()
@@ -514,7 +553,8 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = slides or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images, review_prompt(False, focus, slides))
+        verdict = llm.review(deck_images,
+                             review_prompt(False, focus, slides, risky_fonts))
         verdict["slides_reviewed"] = slides or len(deck_images)
         issues = [i for i in verdict.get("issues", [])
                   if not slides or i.get("slide") in slides]
@@ -596,7 +636,7 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
 
 
 def review_prompt(has_reference: bool, focus: str = None,
-                  slides: list = None) -> str:
+                  slides: list = None, risky_fonts=None) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
@@ -611,6 +651,7 @@ def review_prompt(has_reference: bool, focus: str = None,
             "every issue with the slide number given here, not the image "
             "position, and judge each slide on its own merits."
         )
+    prompt += fonts.qa_font_caveat(risky_fonts)
     if focus:
         prompt += f"\nAdditional focus requested by the caller: {focus}"
     return prompt

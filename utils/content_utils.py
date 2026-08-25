@@ -495,6 +495,7 @@ def extract_slide_text_content(slide) -> Dict:
             "placeholders": [],
             "text_shapes": [],
             "table_text": [],
+            "speaker_notes": "",
             "all_text_combined": ""
         }
         
@@ -566,6 +567,16 @@ def extract_slide_text_content(slide) -> Dict:
                 # Skip shapes that can't be processed
                 continue
         
+        # Speaker notes are kept out of all_text_combined: that string is what
+        # the caller reads to check what the audience sees, and notes are not
+        # on the slide.
+        try:
+            if slide.has_notes_slide:
+                text_content["speaker_notes"] = \
+                    slide.notes_slide.notes_text_frame.text.strip()
+        except Exception as e:
+            logger.debug("notes_extract_skipped error=%s", flatten(str(e)))
+
         # Combine all text
         text_content["all_text_combined"] = "\n".join(all_texts)
         
@@ -574,7 +585,8 @@ def extract_slide_text_content(slide) -> Dict:
             "text_content": text_content,
             "total_text_shapes": len(text_content["placeholders"]) + len(text_content["text_shapes"]),
             "has_title": bool(text_content["slide_title"]),
-            "has_tables": len(text_content["table_text"]) > 0
+            "has_tables": len(text_content["table_text"]) > 0,
+            "has_notes": bool(text_content["speaker_notes"])
         }
         
     except Exception as e:
