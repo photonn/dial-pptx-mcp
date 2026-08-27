@@ -482,13 +482,16 @@ def _check_picture_backgrounds(slide_index, slide, report):
                    for pixel in corners for i, channel in
                    enumerate(pixel[:3])):
             continue  # four different corners: artwork, not a flat pane
-        against = dict(fills)[behind[0]]
+        # The last of them is the one actually visible under the picture:
+        # shapes render back to front, so a later fill covers an earlier one.
+        under = behind[-1]
+        against = dict(fills)[under]
         if all(abs(a - b) <= _UNIFORM_CORNERS for a, b in zip(first, against)):
             continue  # the same colour as the fill: invisible either way
         report.add(WARNING, "opaque_picture_background",
                    f"Slide {slide_index}, shape {shape_index} "
                    f"('{shape.name}') has an opaque {list(first)} background "
-                   f"and sits on the differently coloured shape {behind[0]}, "
+                   f"and sits on the differently coloured shape {under}, "
                    f"so it shows as a rectangle rather than blending into it.",
                    "Use a version of the image with a transparent background, "
                    "or move it onto a white area — visual repair can move and "

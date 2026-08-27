@@ -185,7 +185,8 @@ def _brand_summary(presentations, pres_id, pres):
     except Exception as e:
         logger.warning("export_brand_check_failed error=%s", e)
         return {"validated": False, "note": "brand check unavailable"}
-    return {"brand": report["brand"],
+    return {"validated": True,
+            "brand": report["brand"],
             "errors": report["counts"]["error"],
             "warnings": report["counts"]["warning"]}
 

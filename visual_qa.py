@@ -510,7 +510,7 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
         if reference_pres is not None else []
 
     prompt = review_prompt(bool(ref_images), focus, slides,
-                           fonts.unreliable_fonts_in(pres))
+                           fonts.unreliable_fonts_in(pres), len(ref_images))
     if ref_images:
         prompt += _image_order_note(len(ref_images), len(deck_images))
     verdict = llm.review(ref_images + deck_images, prompt)
@@ -568,7 +568,8 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = slides or list(range(1, len(deck_images) + 1))
-        prompt = review_prompt(bool(ref_images), focus, slides, risky_fonts)
+        prompt = review_prompt(bool(ref_images), focus, slides, risky_fonts,
+                               len(ref_images))
         if ref_images:
             prompt += _image_order_note(len(ref_images), len(deck_images))
         verdict = llm.review(ref_images + deck_images, prompt)
@@ -653,7 +654,15 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
 
 
 def review_prompt(has_reference: bool, focus: str = None,
-                  slides: list = None, risky_fonts=None) -> str:
+                  slides: list = None, risky_fonts=None,
+                  image_offset: int = 0) -> str:
+    """Compose the reviewer's instructions.
+
+    image_offset is how many images precede the deck's own — the reference
+    template's slides are prepended to the same request, so with a slide
+    subset the "image N = slide M" mapping has to start after them or it
+    names the template's images as the deck's.
+    """
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
@@ -662,7 +671,8 @@ def review_prompt(has_reference: bool, focus: str = None,
     )
     if slides:
         mapping = ", ".join(f"image {i} = slide {n}"
-                            for i, n in enumerate(slides, start=1))
+                            for i, n in enumerate(slides,
+                                                  start=image_offset + 1))
         prompt += (
             f"\nYou are shown only part of a larger deck: {mapping}. Report "
             "every issue with the slide number given here, not the image "

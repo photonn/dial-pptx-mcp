@@ -157,6 +157,7 @@ class TestBrandSummaryOnExport(ExportTestCase):
         self.store.set_brand(self.pid, {"profile": self.PROFILE})
         result = self.run_export()
         self.assertNotIn("error", result)          # delivered regardless
+        self.assertIs(result["brand"]["validated"], True)
         self.assertEqual(result["brand"]["brand"], "Example Corp")
         self.assertEqual(result["brand"]["warnings"], 1)  # no page number
         self.assertIn("validate_brand_profile", result["brand_note"])

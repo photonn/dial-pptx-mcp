@@ -1,9 +1,11 @@
 """Tests for get_server_info: it must report what the server actually is,
 not a hardcoded snapshot that drifts."""
+import os
 import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -33,12 +35,27 @@ class TestServerInfo(unittest.TestCase):
                       ("tools", "tools+export_gate", "disabled", "unavailable"))
         self.assertIn(self.info["dial_file_storage"], ("configured", "unset"))
 
-    def test_reports_whether_brand_rules_are_mounted(self):
+    def test_reports_whether_brand_rules_are_configured(self):
         """Unset is the default, and must be reported as such: an agent that
         cannot see validate_brand_profile needs to know whether that is
-        configuration or a fault."""
-        self.assertIn(self.info["brand_profile"],
-                      ("unset", "configured", "configured+reference"))
+        configuration or a fault. When it is set, the report names the files
+        to look for, which is the whole of what the agent has to act on."""
+        status = self.info["brand_profile"]
+        if status == "unset":
+            return
+        self.assertEqual(set(status), {"profile_file", "reference_deck_file"})
+        self.assertTrue(status["profile_file"])
+
+    def test_names_the_configured_brand_files(self):
+        with patch.dict(os.environ, {"BRAND_PROFILE_FILE": "rules.json",
+                                     "BRAND_REFERENCE_DECK_FILE": "ref.pptx"}):
+            status = server._brand_profile_status()
+        self.assertEqual(status, {"profile_file": "rules.json",
+                                  "reference_deck_file": "ref.pptx"})
+        with patch.dict(os.environ, {"BRAND_PROFILE_FILE": "rules.json"},
+                        clear=True):
+            self.assertIsNone(
+                server._brand_profile_status()["reference_deck_file"])
 
     def test_is_annotated_read_only(self):
         tool = server.app._tool_manager._tools["get_server_info"]

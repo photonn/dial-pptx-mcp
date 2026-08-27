@@ -135,13 +135,22 @@ class TestInspectTool(ToolTestCase):
         self.assertIn("image 1 = slide 2", prompt)
         self.assertIn("image 2 = slide 5", prompt)
 
+    def test_the_mapping_starts_after_the_reference_images(self):
+        """A scoped review with a reference deck: the deck's images no longer
+        start at 1, and a mapping that says they do names the template's
+        slides as the deck's."""
+        prompt = visual_qa.review_prompt(True, None, [2, 5], image_offset=3)
+        self.assertIn("image 4 = slide 2", prompt)
+        self.assertIn("image 5 = slide 5", prompt)
+        self.assertNotIn("image 1 = slide 2", prompt)
+
 
 class TestReferenceDeckInTheRepairLoop(ToolTestCase):
     """A reference deck is shown to the reviewer but never to the repairer:
     nothing on the template can be fixed, and its images would shift every
     slide number the planner sees."""
 
-    def _run(self, reference):
+    def _run(self, reference, slides=None):
         seen = {}
 
         def review(self, images, prompt, timeout=None):
@@ -154,6 +163,7 @@ class TestReferenceDeckInTheRepairLoop(ToolTestCase):
         with patch.object(visual_qa, "_render_deck", render), \
              patch.object(visual_qa.VisionLLM, "review", review):
             visual_qa.inspect_and_repair(self.store[self.pid],
+                                         slides=slides,
                                          reference_pres=reference)
         return seen["rounds"][0]
 
@@ -168,6 +178,14 @@ class TestReferenceDeckInTheRepairLoop(ToolTestCase):
         self.assertEqual(images, [b"ref", b"a", b"b", b"c"])
         self.assertIn("images 1-1 are the reference template", prompt)
         self.assertIn("images 2-4 are the deck under review", prompt)
+
+    def test_a_scoped_review_numbers_images_past_the_reference(self):
+        """The two notes have to agree: image 1 is the template, so the
+        subset mapping cannot claim it is the first slide under review."""
+        images, prompt = self._run(make_deck(1), slides=[4, 7, 9])
+        self.assertEqual(images, [b"ref", b"a", b"b", b"c"])
+        self.assertIn("image 2 = slide 4", prompt)
+        self.assertIn("image 4 = slide 9", prompt)
 
 
 class TestBrandContextInTheQaTools(ToolTestCase):

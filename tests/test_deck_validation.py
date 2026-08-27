@@ -386,6 +386,42 @@ class TestPictureBackgrounds(unittest.TestCase):
         report = deck_validation.validate_presentation(pres)
         self.assertNotIn("opaque_picture_background", codes(report))
 
+    def test_the_topmost_fill_is_the_one_compared_against(self):
+        """Two stacked panels: the icon sits on the upper one, and that is the
+        colour it has to match. Comparing against the backmost fill would call
+        this clean and let a visible rectangle through."""
+        pres = blank_deck()
+        slide = pres.slides[0]
+        for colour in ((240, 235, 220), (0, 93, 185)):
+            panel = slide.shapes.add_shape(1, Inches(1), Inches(1), Inches(3),
+                                           Inches(3))
+            panel.fill.solid()
+            panel.fill.fore_color.rgb = RGBColor(*colour)
+        slide.shapes.add_picture(_square_png(opaque=True,
+                                             background=(240, 235, 220)),
+                                 Inches(2), Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertIn("opaque_picture_background", codes(report, "warning"))
+        problem = [p for p in report["problems"]
+                   if p["code"] == "opaque_picture_background"][0]
+        self.assertIn("shape 1", problem["message"])
+
+    def test_an_icon_matching_the_topmost_fill_is_left_alone(self):
+        """The mirror: a backmost panel of another colour is irrelevant, the
+        icon blends into the one it is actually on."""
+        pres = blank_deck()
+        slide = pres.slides[0]
+        for colour in ((213, 0, 88), (0, 93, 185)):
+            panel = slide.shapes.add_shape(1, Inches(1), Inches(1), Inches(3),
+                                           Inches(3))
+            panel.fill.solid()
+            panel.fill.fore_color.rgb = RGBColor(*colour)
+        slide.shapes.add_picture(_square_png(opaque=True,
+                                             background=(0, 93, 185)),
+                                 Inches(2), Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
     def test_a_white_card_is_not_a_coloured_background(self):
         pres = blank_deck()
         slide = pres.slides[0]
