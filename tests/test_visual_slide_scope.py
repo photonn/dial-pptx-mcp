@@ -136,6 +136,98 @@ class TestInspectTool(ToolTestCase):
         self.assertIn("image 2 = slide 5", prompt)
 
 
+class TestReferenceDeckInTheRepairLoop(ToolTestCase):
+    """A reference deck is shown to the reviewer but never to the repairer:
+    nothing on the template can be fixed, and its images would shift every
+    slide number the planner sees."""
+
+    def _run(self, reference):
+        seen = {}
+
+        def review(self, images, prompt, timeout=None):
+            seen.setdefault("rounds", []).append((list(images), prompt))
+            return {"passed": True, "issues": []}
+
+        def render(pres, max_slides=None, slides=None):
+            return [b"ref"] if pres is reference else [b"a", b"b", b"c"]
+
+        with patch.object(visual_qa, "_render_deck", render), \
+             patch.object(visual_qa.VisionLLM, "review", review):
+            visual_qa.inspect_and_repair(self.store[self.pid],
+                                         reference_pres=reference)
+        return seen["rounds"][0]
+
+    def test_without_a_reference_only_the_deck_is_sent(self):
+        images, prompt = self._run(None)
+        self.assertEqual(images, [b"a", b"b", b"c"])
+        self.assertNotIn("Image order", prompt)
+
+    def test_the_reference_images_come_first_and_are_labelled(self):
+        reference = make_deck(1)
+        images, prompt = self._run(reference)
+        self.assertEqual(images, [b"ref", b"a", b"b", b"c"])
+        self.assertIn("images 1-1 are the reference template", prompt)
+        self.assertIn("images 2-4 are the deck under review", prompt)
+
+
+class TestBrandContextInTheQaTools(ToolTestCase):
+    """The QA tools read the deck's attached brand rules. A deck that never
+    attached any is reviewed without them and told so — losing a build's QA
+    pass over missing rules costs more than reviewing without them."""
+
+    def setUp(self):
+        super().setUp()
+        self._brand_saved = os.environ.get("BRAND_PROFILE_FILE")
+        os.environ.pop("BRAND_PROFILE_FILE", None)
+        self.addCleanup(self._restore_brand)
+
+    def _restore_brand(self):
+        if self._brand_saved is None:
+            os.environ.pop("BRAND_PROFILE_FILE", None)
+        else:
+            os.environ["BRAND_PROFILE_FILE"] = self._brand_saved
+
+    def _inspect(self):
+        seen = {}
+
+        def fake(pres, reference=None, focus=None, slides=None):
+            seen.update(focus=focus, reference=reference)
+            return {"passed": True, "issues": []}
+
+        with patch.object(visual_qa, "inspect_presentation", fake):
+            result = self.app.tools["visual_inspect_slides"](self.pid)
+        return seen, result
+
+    def test_no_brand_profile_on_the_server_means_no_note(self):
+        seen, result = self._inspect()
+        self.assertIsNone(seen["focus"])
+        self.assertNotIn("brand_note", result)
+
+    def test_the_review_notes_reach_the_reviewer(self):
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        self.store.set_brand(self.pid, {
+            "profile": {"review_notes": ["Headlines must be messages."]}})
+        seen, result = self._inspect()
+        self.assertEqual(seen["focus"], "Headlines must be messages.")
+        self.assertNotIn("brand_note", result)
+
+    def test_an_unattached_profile_is_a_note_not_an_error(self):
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        seen, result = self._inspect()
+        self.assertTrue(result["passed"])
+        self.assertIsNone(seen["focus"])
+        self.assertIn("attach_brand_profile", result["brand_note"])
+        self.assertIn("without the brand rules", result["brand_note"])
+
+    def test_the_attached_reference_deck_is_shown_to_the_reviewer(self):
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        reference = make_deck(1)
+        self.store.set_brand(self.pid, {"profile": {"name": "Example Corp"},
+                                        "reference": reference})
+        seen, _ = self._inspect()
+        self.assertIs(seen["reference"], reference)
+
+
 class TestRepairScope(ToolTestCase):
     def test_out_of_scope_operations_are_skipped(self):
         pres = self.store[self.pid]
@@ -177,8 +269,10 @@ class TestRepairScope(ToolTestCase):
     def test_repair_tool_confines_operations_to_scope(self):
         seen = {}
 
-        def fake_inspect(pres, slides=None, focus=None, max_iterations=None):
-            seen.update(slides=slides, max_iterations=max_iterations)
+        def fake_inspect(pres, slides=None, focus=None, max_iterations=None,
+                         reference_pres=None):
+            seen.update(slides=slides, max_iterations=max_iterations,
+                        reference=reference_pres)
             return {"passed": True, "iterations": 1, "repair_rounds": []}
 
         with patch.object(visual_qa, "inspect_and_repair", fake_inspect):
@@ -186,6 +280,8 @@ class TestRepairScope(ToolTestCase):
                 self.pid, slides=[3, 1], max_iterations=2)
         self.assertEqual(seen["slides"], [1, 3])
         self.assertEqual(seen["max_iterations"], 2)
+        # No brand reference deck is configured, so none is passed.
+        self.assertIsNone(seen["reference"])
         self.assertEqual(result["scope"], [1, 3])
         # A scoped pass does not certify the whole deck.
         self.assertTrue(self.store.is_dirty(self.pid))

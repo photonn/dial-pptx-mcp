@@ -1,0 +1,62 @@
+{
+  "$comment": [
+    "Example brand profile for brand_validation.py — the values are invented,",
+    "the shape is real. Copy it, put your own brand's numbers in, and upload",
+    "the result to DIAL file storage beside your template under the name in",
+    "BRAND_PROFILE_FILE. Leave this file alone: no real brand's values belong",
+    "in this repository.",
+    "See brand_profile.schema.json. Lengths in inches, colours as [r, g, b]."
+  ],
+
+  "name": "Example Corp",
+
+  "fonts": {
+    "allowed": ["Example Sans"],
+    "severity": "warning"
+  },
+
+  "min_font_pt": 14,
+  "min_font_exempt_idx": [14, 15],
+
+  "palette_rgb": [
+    [0, 93, 185], [0, 61, 122], [213, 0, 88],
+    [0, 0, 0], [70, 70, 70], [130, 136, 149], [191, 191, 191],
+    [231, 231, 231], [247, 248, 249], [255, 255, 255],
+    [41, 186, 116], [235, 140, 0]
+  ],
+  "palette_tolerance": 6,
+
+  "families": {
+    "light": {
+      "safe_area_in": {"x": 0.52, "y": 1.74, "w": 12.28, "h": 5.36},
+      "require": ["separator_line", "logo", "slide_number"]
+    },
+    "dark": {
+      "safe_area_in": {"x": 0.52, "y": 1.50, "w": 12.28, "h": 5.60},
+      "require": ["logo", "slide_number"]
+    }
+  },
+
+  "chrome_idx": [0, 10, 14, 15],
+  "chrome_shapes": {
+    "separator_line": {"type": "line", "y_in": 1.03, "tolerance_in": 0.05},
+    "logo": {
+      "type": "picture",
+      "aspect_ratios": [1.714, 1.275],
+      "aspect_tolerance": 0.03
+    },
+    "slide_number": {"type": "placeholder", "idx": 15}
+  },
+
+  "require_alpha_on_fills": true,
+  "max_consecutive_same_family": 5,
+
+  "exempt_layouts": ["01 Title", "13 Closing"],
+
+  "review_notes": [
+    "Every headline must state a message with a clear implication, not a topic label. 'Revenue grew 12% driven by Consumer Health' is correct; 'Revenue Overview' is a defect.",
+    "No slide may be plain text on a white background. Content must be organised with coloured boxes, cards, panels or callouts.",
+    "The deck must mix full-colour and white slides. A long run of identical white slides is a defect.",
+    "Icons must never show a white or coloured square around them when placed on a tinted fill."
+  ]
+}

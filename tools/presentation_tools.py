@@ -42,7 +42,17 @@ def _visual_qa_gate(presentations, pres_id):
         return None
     logger.info("qa_gate_start presentation_id=%s", short_id(pres_id))
     try:
-        outcome = visual_qa.inspect_and_repair(presentations[pres_id])
+        # The brand profile's review_notes are the rules no measurement can
+        # express (a headline must carry a message; a slide must not be plain
+        # text on white), and the reference deck lets the reviewer compare
+        # against a real branded deck instead of inferring the brand from the
+        # slides in front of it. Both come from the deck's attached brand
+        # context and are simply absent when nothing was attached: the gate
+        # exists to catch bad slides, not to hold a deck hostage to a build
+        # that never called attach_brand_profile.
+        focus, reference = _brand_review_context(presentations, pres_id)
+        outcome = visual_qa.inspect_and_repair(
+            presentations[pres_id], focus=focus, reference_pres=reference)
     except visual_qa.VisualQAError as e:
         if visual_qa.fail_open_on_error():
             logger.warning("qa_gate_failed_open presentation_id=%s error=%s",
@@ -83,6 +93,15 @@ def _visual_qa_gate(presentations, pres_id):
         if key in outcome:
             refusal[key] = outcome[key]
     return refusal
+
+
+def _brand_review_context(presentations, pres_id):
+    """-> (reviewer focus, reference deck) from the deck's brand rules, if any."""
+    import brand_validation
+
+    context = presentations.brand_for(pres_id) or {}
+    return (brand_validation.review_focus(context.get("profile")),
+            context.get("reference"))
 
 
 def _export_pdf(client, pres, blob, stem):
@@ -136,6 +155,39 @@ def _structure_summary(pres, blob):
     except Exception as e:
         logger.warning("export_structure_check_failed error=%s", e)
         return {"validated": False, "note": "structural check unavailable"}
+
+
+def _brand_summary(presentations, pres_id, pres):
+    """Brand check folded into every export, when the deck has rules attached.
+
+    Reported, never blocking — same reasoning as _structure_summary, and more
+    so here: a brand rule is a house style, and refusing to deliver a finished
+    deck over one costs the user far more than the finding does. On a server
+    with no brand profile the key is left out entirely, so an agent is never
+    told about rules it cannot see; on one that has a profile the deck never
+    attached, it is told exactly that, since a deck delivered unchecked should
+    not look like a deck that passed.
+    """
+    import brand_validation
+
+    if not brand_validation.enabled():
+        return None
+    context = presentations.brand_for(pres_id) or {}
+    profile = context.get("profile")
+    if not profile:
+        from tools.brand_tools import not_attached_error
+
+        return {"validated": False,
+                "note": not_attached_error(
+                    brand_validation.profile_file_name())}
+    try:
+        report = brand_validation.validate_brand(pres, profile)
+    except Exception as e:
+        logger.warning("export_brand_check_failed error=%s", e)
+        return {"validated": False, "note": "brand check unavailable"}
+    return {"brand": report["brand"],
+            "errors": report["counts"]["error"],
+            "warnings": report["counts"]["warning"]}
 
 
 def _visual_qa_status(presentations, pres_id):
@@ -582,6 +634,22 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
                     "file was uploaded regardless; call "
                     "validate_presentation for the details and fixes."
                 )
+            brand = _brand_summary(presentations, presentation_id, pres)
+            if brand:
+                result["brand"] = brand
+                if brand.get("validated") is False:
+                    result["brand_note"] = (
+                        f"{brand['note']} The file was delivered regardless, "
+                        "but it has not been checked against the brand rules."
+                    )
+                elif brand.get("errors") or brand.get("warnings"):
+                    result["brand_note"] = (
+                        f"The deck breaks {brand.get('errors', 0)} rule(s) at "
+                        f"error and {brand.get('warnings', 0)} at warning "
+                        f"severity in the {brand.get('brand')} brand profile. "
+                        "The file was delivered regardless; call "
+                        "validate_brand_profile for the details and fixes."
+                    )
             if qa_status == "unverified":
                 result["visual_qa_note"] = (
                     "This deck was never visually inspected, or was edited "

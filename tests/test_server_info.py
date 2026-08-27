@@ -33,6 +33,13 @@ class TestServerInfo(unittest.TestCase):
                       ("tools", "tools+export_gate", "disabled", "unavailable"))
         self.assertIn(self.info["dial_file_storage"], ("configured", "unset"))
 
+    def test_reports_whether_brand_rules_are_mounted(self):
+        """Unset is the default, and must be reported as such: an agent that
+        cannot see validate_brand_profile needs to know whether that is
+        configuration or a fault."""
+        self.assertIn(self.info["brand_profile"],
+                      ("unset", "configured", "configured+reference"))
+
     def test_is_annotated_read_only(self):
         tool = server.app._tool_manager._tools["get_server_info"]
         self.assertTrue(tool.annotations.readOnlyHint)

@@ -6,6 +6,8 @@ so the converter is stubbed: what is under test is the export tool's handling â€
 which files it produces, what it names them, and what it does when the renderer
 is missing â€” not LibreOffice itself.
 """
+import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -22,9 +24,12 @@ import visual_qa
 
 
 class FakeDialClient:
-    """Stands in for DialFileClient: records uploads, returns a file URL."""
+    """Stands in for DialFileClient: records uploads, returns a file URL, and
+    serves whatever `files` holds on the download side (the export path reads
+    the brand profile through the same client)."""
 
     instances = []
+    files = {}
 
     def __init__(self, *args, **kwargs):
         self.uploaded = []
@@ -34,6 +39,12 @@ class FakeDialClient:
         self.uploaded.append({"filename": filename, "bytes": len(data),
                               "content_type": content_type})
         return f"files/test-bucket/{filename}"
+
+    def download(self, ref):
+        if ref not in FakeDialClient.files:
+            from dial_client import DialConfigError
+            raise DialConfigError("DIAL Core refused this file (404).")
+        return FakeDialClient.files[ref]
 
 
 def build_tools():
@@ -47,6 +58,7 @@ def build_tools():
 class ExportTestCase(unittest.TestCase):
     def setUp(self):
         FakeDialClient.instances = []
+        FakeDialClient.files = {}
         self.tools, self.store = build_tools()
         self.export = self.tools["export_presentation"].fn
         pres = Presentation()
@@ -111,6 +123,53 @@ class TestExportFormats(ExportTestCase):
 
     def test_an_empty_filename_is_refused(self):
         self.assertIn("error", self.run_export(filename=".pptx"))
+
+
+class TestBrandSummaryOnExport(ExportTestCase):
+    """Export reports where the deck stands against the rules attached to it;
+    it never blocks on them, and says nothing at all where the server has no
+    brand profile."""
+
+    PROFILE = {"name": "Example Corp", "min_font_pt": 14,
+               "families": {"light": {"require": ["slide_number"]}},
+               "chrome_shapes": {"slide_number": {"type": "placeholder",
+                                                  "idx": 12}}}
+
+    def setUp(self):
+        super().setUp()
+        self._saved = os.environ.get("BRAND_PROFILE_FILE")
+        os.environ.pop("BRAND_PROFILE_FILE", None)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("BRAND_PROFILE_FILE", None)
+        else:
+            os.environ["BRAND_PROFILE_FILE"] = self._saved
+
+    def test_no_profile_configured_no_brand_key(self):
+        result = self.run_export()
+        self.assertNotIn("brand", result)
+        self.assertNotIn("brand_note", result)
+
+    def test_attached_rules_are_reported_and_do_not_block(self):
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        self.store.set_brand(self.pid, {"profile": self.PROFILE})
+        result = self.run_export()
+        self.assertNotIn("error", result)          # delivered regardless
+        self.assertEqual(result["brand"]["brand"], "Example Corp")
+        self.assertEqual(result["brand"]["warnings"], 1)  # no page number
+        self.assertIn("validate_brand_profile", result["brand_note"])
+
+    def test_a_deck_with_nothing_attached_is_told_so(self):
+        """Delivered unchecked must not look the same as delivered clean."""
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        result = self.run_export()
+        self.assertNotIn("error", result)
+        self.assertTrue(result["file_url"])
+        self.assertIs(result["brand"]["validated"], False)
+        self.assertIn("attach_brand_profile", result["brand_note"])
+        self.assertIn("not been checked", result["brand_note"])
 
 
 class TestPdfFailureHandling(ExportTestCase):

@@ -43,6 +43,7 @@ from tools import (
     register_slide_tools,
     register_slide_number_tools,
     register_validation_tools,
+    register_brand_tools,
     register_guidance_tools,
     register_preview_tools
 )
@@ -61,6 +62,10 @@ app = FastMCP(
         "Before planning a deck, call get_design_guidance: it covers deck "
         "structure, layout, type and colour, and how to work with a supplied "
         "template rather than over it.\n"
+        "If attach_brand_profile is in your tool list, this deployment holds "
+        "decks to a brand profile: call it right after creating the "
+        "presentation and build to the rules it returns — they are cheaper to "
+        "follow than to retrofit.\n"
         "While building, inspect each slide you finish with "
         "visual_inspect_slides(slides=[n]). Before exporting, run "
         "validate_presentation for structural faults and visual_repair_slides "
@@ -352,6 +357,11 @@ register_validation_tools(
     presentations
 )
 
+register_brand_tools(
+    app,
+    presentations
+)
+
 register_guidance_tools(
     app,
     presentations
@@ -391,7 +401,25 @@ def get_server_info() -> Dict:
         "visual_qa": _visual_qa_status(),
         "dial_file_storage": ("configured" if os.environ.get("DIAL_CORE_URL")
                               else "unset"),
+        "brand_profile": _brand_profile_status(),
     }
+
+
+def _brand_profile_status():
+    """The brand files this deployment expects, by name.
+
+    Names, not contents: the files live in DIAL storage and are fetched from a
+    URL the orchestrator resolves per deck (attach_brand_profile), so there is
+    nothing here to read and nothing to report as reachable. Worth reporting
+    at all because "the brand tools are missing" is otherwise
+    indistinguishable from a bug."""
+    import brand_validation
+
+    if not brand_validation.enabled():
+        return "unset"
+    reference = brand_validation.reference_deck_file_name()
+    return {"profile_file": brand_validation.profile_file_name(),
+            "reference_deck_file": reference or None}
 
 
 def _transport_security_for(host: str):

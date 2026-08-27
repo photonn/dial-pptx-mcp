@@ -125,6 +125,28 @@ class PresentationStore(MutableMapping):
             entry = self._items.get(pres_id)
             return bool(entry and entry["needs_inspection"])
 
+    def set_brand(self, pres_id, context):
+        """Attach the deck's brand context (see tools/brand_tools.py).
+
+        Brand rules are per *deck*, not per server: the file lives in DIAL
+        storage under a name the operator configured, and the orchestrator
+        resolves that name to a file it can actually read, then hands it here
+        once. Keeping the result on the deck rather than in a module global
+        is what stops one caller's profile — and the review_notes inside it,
+        which become prompt text — from reaching another caller's review.
+        It expires with the deck it belongs to.
+        """
+        with self._lock:
+            entry = self._items.get(pres_id)
+            if entry:
+                entry["brand"] = context
+
+    def brand_for(self, pres_id):
+        """The deck's brand context, or None if none was attached."""
+        with self._lock:
+            entry = self._items.get(pres_id)
+            return entry.get("brand") if entry else None
+
     def lock_for(self, pres_id):
         """Per-presentation lock, or a throwaway lock for unknown/missing IDs
         (the tool will then return its normal not-found error)."""

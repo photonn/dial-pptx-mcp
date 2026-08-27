@@ -5,6 +5,10 @@ This is the axis visual QA cannot see. A deck with a dangling relationship or a
 chart with no series renders in LibreOffice and opens in python-pptx — the two
 things the visual pass relies on — and still arrives broken on the user's
 machine. The checks live in deck_validation.py; this module is the MCP surface.
+
+The brand axis — is this deck *this organisation's* deck — is a separate
+question with a separate answer, in tools/brand_tools.py: it needs rules the
+deployment supplies, where this module needs nothing at all.
 """
 from typing import Dict
 

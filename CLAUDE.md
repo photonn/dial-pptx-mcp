@@ -77,6 +77,40 @@ similarity and the widths differ. `unreliable_fonts_in` drives both an `info` pr
 appended to `REVIEW_PROMPT`, telling the reviewer to report only substantial overflow for text in those fonts. Do not
 "fix" a template's fonts to satisfy QA — brand beats QA precision, which is what the caveat exists to make possible.
 
+**Brand rules (`brand_validation.py`, `tools/brand_tools.py`).** The third validation axis: not whether the file is
+well-formed (`deck_validation`) or whether it looks right (`visual_qa`), but whether it is *this organisation's* deck —
+which is not a property of the deck, so the repo ships the engine and the deployment supplies the rules.
+`brand_validation` is a JSON interpreter: it knows the shape of a brand rule (allowed fonts, a size floor, a palette, a
+safe area, required chrome, a cap on consecutive same-family backgrounds) and no brand's values. `brand_profile.schema.json`
+and an `Example Corp` sample are committed; real values never enter the repo.
+
+**The server is told file *names*, not paths** — `BRAND_PROFILE_FILE`, `BRAND_REFERENCE_DECK_FILE`. Buckets move and a
+name does not, so a path in config is a time bomb. The orchestrator resolves the name against the files it can actually
+read and passes the URL to `attach_brand_profile` (`dial_url`-flagged, like `image_url`), which is also the only way the
+read can succeed: Quick Apps grants the request's key access to files named by those parameters and nothing else, so a
+server-side fetch of a configured path returns 403. `check_file_name` compares only the basename, before any fetch —
+that check is what separates "the brand profile" from any JSON the caller happens to hold, which matters because
+`review_notes` becomes prompt text for the reviewer.
+
+**Brand context lives on the deck** (`PresentationStore.set_brand`/`brand_for`), not in a module global: it expires with
+the deck, and one caller's profile can never steer another caller's review. The reference deck is stored as an open
+Presentation there — never shown to the repair planner, since nothing on the template can be repaired and its images
+would shift every slide number the planner sees.
+
+Three states, three behaviours, and the distinction is the point: **no `BRAND_PROFILE_FILE`** = the feature does not
+exist (no tools, no export key, no reviewer focus), gated on the env var alone so registration needs no network call;
+**attached** = checks run; **configured but never attached** = `validate_brand_profile` errors with the file name to
+look for (checking a deck against nothing and calling it clean is worse than saying so), export delivers with
+`"brand": {"validated": false}`, and the QA tools review without the rules and return a `brand_note`. Never block a
+finished deck on missing rules.
+
+Findings reuse `deck_validation`'s report shape (and its `_Report`, `_solid_fill_rgb`, `_corner_pixels`) so the agent
+reads one dialect. **The rules that need judgement rather than measurement stay out of the code**: `review_notes` is
+prose fed to the vision reviewer as `focus` by both QA tools and the export gate, which is what lets "a headline must be
+a message" be enforced without the repo knowing what a headline should say. `attach_brand_profile`'s description is
+composed at registration (`__doc__ =`, not an f-string literal, which would leave the tool with no description at all)
+because it has to name the file the agent must go and find.
+
 **Slide numbers (`tools/slide_number_tools.py`).** `iter_cloneable_placeholders` excludes date/footer/slide-number
 placeholders, so a template that positions and styles its page numbers produces a deck with none, and `duplicate_slide`
 propagates the gap. `add_slide_numbers` deep-copies the layout's own `sldNum` element onto each slide — what PowerPoint

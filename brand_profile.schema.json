@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/photonn/dial-pptx-mcp/brand_profile.schema.json",
+  "title": "Brand profile",
+  "description": "Rules for brand_validation.py. Uploaded to DIAL file storage under the file name in BRAND_PROFILE_FILE, and attached to a deck with attach_brand_profile; never committed with real brand values — the repo ships this schema and brand_profile.example.json only. All lengths in inches, all colours as [r, g, b].",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Brand name, echoed in reports so the agent can name what it is being held to."
+    },
+    "severity": {
+      "$ref": "#/definitions/severity",
+      "description": "Default severity for every finding (default: warning). Export never blocks on a warning."
+    },
+    "fonts": {
+      "type": "object",
+      "description": "Typefaces the brand allows. Only explicitly-set fonts are checked; text that inherits the template's font is by definition on-brand.",
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Case-insensitive font names. Empty or absent disables the check."
+        },
+        "severity": {"$ref": "#/definitions/severity"}
+      },
+      "additionalProperties": false
+    },
+    "min_font_pt": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Smallest point size any visible text may use."
+    },
+    "min_font_exempt_idx": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "Placeholder idx values exempt from the size floor — the template's own fine print, e.g. a source line or a page number."
+    },
+    "palette_rgb": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/rgb"},
+      "description": "Every colour the brand allows. Theme colours are never checked against this: they come from the brand's own template."
+    },
+    "palette_tolerance": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 6,
+      "description": "Per-channel slack when matching a colour to the palette."
+    },
+    "families": {
+      "type": "object",
+      "description": "Rules that differ by background family. A slide is 'dark' when its background luminance is below 0.5, 'light' otherwise.",
+      "properties": {
+        "light": {"$ref": "#/definitions/family"},
+        "dark": {"$ref": "#/definitions/family"}
+      },
+      "additionalProperties": false
+    },
+    "chrome_idx": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "Placeholder idx values the template places outside the safe area on purpose (logo, page number, source line), and which are therefore not reported for crossing it."
+    },
+    "chrome_shapes": {
+      "type": "object",
+      "description": "How to recognise each piece of required chrome. Keys are the names used in families.*.require.",
+      "additionalProperties": {"$ref": "#/definitions/chromeShape"}
+    },
+    "require_alpha_on_fills": {
+      "type": "boolean",
+      "description": "Report a picture with an opaque background placed on a coloured slide — the flattened-icon defect."
+    },
+    "max_consecutive_same_family": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Longest run of slides allowed on one background family before the deck is reported as monotonous."
+    },
+    "exempt_layouts": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Layout names (case-insensitive) whose slides are not checked for required chrome — typically the title and closing layouts."
+    },
+    "review_notes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Rules that cannot be made deterministic. Joined and passed to the vision reviewer as its extra focus, so they are enforced by the model rather than by this module."
+    }
+  },
+  "definitions": {
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info"]
+    },
+    "rgb": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0, "maximum": 255},
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "family": {
+      "type": "object",
+      "properties": {
+        "safe_area_in": {
+          "type": "object",
+          "description": "The frame content must stay inside — well inside the slide edge, which is all deck_validation checks.",
+          "properties": {
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "w": {"type": "number", "exclusiveMinimum": 0},
+            "h": {"type": "number", "exclusiveMinimum": 0},
+            "tolerance": {"type": "number", "minimum": 0, "default": 0.02}
+          },
+          "required": ["x", "y", "w", "h"],
+          "additionalProperties": false
+        },
+        "require": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Names from chrome_shapes that every slide of this family must carry."
+        }
+      },
+      "additionalProperties": false
+    },
+    "chromeShape": {
+      "type": "object",
+      "description": "A placeholder is looked for on the slide itself (an inherited placeholder renders nothing until the slide carries its own copy); a line or a picture is looked for on the slide, its layout and its master, because those do render by inheritance.",
+      "properties": {
+        "type": {"type": "string", "enum": ["placeholder", "picture", "line"]},
+        "idx": {"type": "integer", "description": "placeholder: the placeholder idx to look for."},
+        "aspect_ratios": {
+          "type": "array",
+          "items": {"type": "number", "exclusiveMinimum": 0},
+          "description": "picture: acceptable width/height ratios — one per approved variant of the mark."
+        },
+        "aspect_tolerance": {"type": "number", "minimum": 0, "default": 0.03},
+        "y_in": {"type": "number", "description": "line: where the rule sits from the top of the slide."},
+        "tolerance_in": {"type": "number", "minimum": 0, "default": 0.05},
+        "max_height": {"type": "number", "minimum": 0, "default": 0.06, "description": "line: how thick a shape may be and still count as a rule."}
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    }
+  }
+}

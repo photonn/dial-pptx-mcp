@@ -119,6 +119,47 @@ class TestGateVerdicts(GateTestCase):
         self.assertEqual(mock.call_count, 2)
 
 
+class TestBrandContext(GateTestCase):
+    """The gate hands the reviewer whatever brand context the deck carries:
+    the profile's semantic rules as focus, and the reference deck to compare
+    against. Absent when nothing was attached, and never a reason to fail."""
+
+    def _gate(self):
+        seen = {}
+
+        def fake(pres, focus=None, reference_pres=None, **kwargs):
+            seen.update(focus=focus, reference=reference_pres)
+            return {"passed": True, "iterations": 1, "repair_rounds": []}
+
+        with patch.object(visual_qa, "inspect_and_repair", fake):
+            _visual_qa_gate(self.store, self.pid)
+        return seen
+
+    def test_nothing_attached_means_no_extra_context(self):
+        seen = self._gate()
+        self.assertIsNone(seen["focus"])
+        self.assertIsNone(seen["reference"])
+
+    def test_the_profiles_review_notes_become_the_reviewers_focus(self):
+        self.store.set_brand(self.pid, {"profile": {
+            "name": "Example Corp",
+            "review_notes": ["Headlines must be messages."]}})
+        self.assertEqual(self._gate()["focus"],
+                         "Headlines must be messages.")
+
+    def test_the_reference_deck_is_passed_when_attached(self):
+        from pptx import Presentation
+
+        reference = Presentation()
+        self.store.set_brand(self.pid, {"profile": {"name": "Example Corp"},
+                                        "reference": reference})
+        self.assertIs(self._gate()["reference"], reference)
+
+    def test_a_profile_without_review_notes_adds_no_focus(self):
+        self.store.set_brand(self.pid, {"profile": {"name": "Example Corp"}})
+        self.assertIsNone(self._gate()["focus"])
+
+
 class TestExportStatus(GateTestCase):
     """With the gate off, export reports the deck's QA state instead."""
 

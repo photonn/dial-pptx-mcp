@@ -42,6 +42,16 @@ spec:
             # slide, so it roughly doubles the QA cost.
             #- name: VISUAL_QA_EXPORT_GATE
             #  value: "true"
+            # Optional brand layer. File NAMES only: the files live in DIAL
+            # storage beside the template, and the orchestrator resolves the
+            # name to a URL it can read (attach_brand_profile). No ConfigMap,
+            # no mount, and no bucket path to update when storage moves.
+            # With BRAND_PROFILE_FILE unset the brand layer does not exist,
+            # so this rolls out safely before the files are in place.
+            #- name: BRAND_PROFILE_FILE
+            #  value: "brand_profile.json"
+            #- name: BRAND_REFERENCE_DECK_FILE
+            #  value: "brand_reference.pptx"
             - name: DIAL_CORE_URL
               value: "https://<YOUR-DIAL-CORE-HOST>"
             - name: DIAL_API_KEY

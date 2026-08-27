@@ -15,6 +15,14 @@ Both are registered whenever the vision LLM is configured
 (visual_qa.enforcement_enabled). Operators who additionally want export to
 refuse an unverified deck set VISUAL_QA_EXPORT_GATE=true; see
 tools/presentation_tools.py.
+
+Where a deck has brand rules attached (attach_brand_profile), both tools carry
+the profile's `review_notes` into every review as standing focus, and its
+reference deck is shown to the reviewer as the template to match. That is where
+the brand rules no measurement can express live — "a headline must state a
+message", "no slide may be plain text on white" — and they belong here rather
+than only on the export path, because this is where the agent can still fix the
+slide it just built.
 """
 from typing import Dict, List, Optional
 
@@ -34,6 +42,35 @@ UNKNOWN_ID = (
 
 def _scope(slides):
     return "deck" if not slides else ",".join(str(n) for n in slides)
+
+
+def _brand_context(presentations, presentation_id, focus):
+    """-> (focus, reference_pres, note) from the deck's attached brand rules.
+
+    The caller's own instruction comes first: it is about the slide in front
+    of it, the profile's notes are standing rules.
+
+    A deck with no rules attached is reviewed without them and told so, rather
+    than refused: the findings are worth having either way, and a build that
+    never called attach_brand_profile should not lose its QA pass over it.
+    """
+    import brand_validation
+
+    context = presentations.brand_for(presentation_id) or {}
+    profile = context.get("profile")
+    if not profile:
+        if not brand_validation.enabled():
+            return focus, None, None
+        from tools.brand_tools import not_attached_error
+
+        return focus, None, not_attached_error(
+            brand_validation.profile_file_name()) + (
+            " The slides were reviewed without the brand rules.")
+
+    notes = brand_validation.review_focus(profile)
+    if notes:
+        focus = f"{focus.strip()} {notes}" if focus and focus.strip() else notes
+    return focus, context.get("reference"), None
 
 
 def register_visual_tools(app: FastMCP, presentations):
@@ -78,7 +115,9 @@ def register_visual_tools(app: FastMCP, presentations):
         focus: extra instruction for the reviewer, e.g. "check the chart
         labels are legible".
         reference_presentation_id: a template deck to compare against for
-        brand fidelity (whole-deck review only).
+        brand fidelity (whole-deck review only). If this server has a brand
+        reference deck configured, it is used automatically and you do not
+        need to supply one.
 
         Returns {"passed": bool, "issues": [{"slide", "severity",
         "description", "suggested_fix"}]}. Slide numbers in issues are
@@ -88,7 +127,8 @@ def register_visual_tools(app: FastMCP, presentations):
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
             return error
-        reference = None
+        focus, reference, brand_note = _brand_context(
+            presentations, presentation_id, focus)
         if reference_presentation_id is not None:
             if reference_presentation_id not in presentations:
                 return {"error": "Unknown or expired reference_presentation_id."}
@@ -112,6 +152,8 @@ def register_visual_tools(app: FastMCP, presentations):
         if verdict.get("passed") is True and not numbers:
             presentations.clear_dirty(presentation_id)
         verdict["scope"] = numbers or "deck"
+        if brand_note:
+            verdict["brand_note"] = brand_note
         return verdict
 
     @app.tool(
@@ -145,12 +187,15 @@ def register_visual_tools(app: FastMCP, presentations):
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
             return error
+        focus, reference, brand_note = _brand_context(
+            presentations, presentation_id, focus)
 
         logger.info("visual_repair_start presentation_id=%s scope=%s",
                     short_id(presentation_id), _scope(numbers))
         try:
-            outcome = visual_qa.inspect_and_repair(pres, numbers, focus,
-                                                   max_iterations)
+            outcome = visual_qa.inspect_and_repair(
+                pres, numbers, focus, max_iterations,
+                reference_pres=reference)
         except visual_qa.VisualQAError as e:
             logger.error("visual_repair_failed presentation_id=%s scope=%s "
                          "reason=qa_error error=%s", short_id(presentation_id),
@@ -165,4 +210,6 @@ def register_visual_tools(app: FastMCP, presentations):
         if outcome.get("passed") and not numbers:
             presentations.clear_dirty(presentation_id)
         outcome["scope"] = numbers or "deck"
+        if brand_note:
+            outcome["brand_note"] = brand_note
         return outcome

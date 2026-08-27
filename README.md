@@ -43,6 +43,8 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
+| `BRAND_PROFILE_FILE` | no | — | **File name** (not a path) of the brand-rules JSON, e.g. `brand_profile.json` — schema in [`brand_profile.schema.json`](brand_profile.schema.json), sample in [`brand_profile.example.json`](brand_profile.example.json). Keep the file in DIAL storage beside the template; the orchestrator finds it among the files it can read and passes its URL to `attach_brand_profile`. Set it and the server registers the two brand tools, feeds the profile's `review_notes` to the visual reviewer, and reports a non-blocking `"brand"` summary on export. Unset, the whole brand layer is inert |
+| `BRAND_REFERENCE_DECK_FILE` | no | — | File name of a real, on-brand `.pptx`, e.g. `brand_reference.pptx`. Attached the same way, and shown to the vision reviewer alongside the deck under review so it compares against the brand instead of inferring it |
 | `VISION_LLM_MODEL` | for visual QA | — | Vision model: the model name (direct endpoint) or the DIAL deployment name (DIAL provider); must accept image input |
 | `VISION_LLM_ENDPOINT` | direct provider | — | OpenAI Responses-API endpoint, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. When unset, the model is called through DIAL Core instead: `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` with DIAL credentials (caller headers first, `DIAL_API_KEY` fallback) |
 | `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
@@ -180,6 +182,37 @@ It checks the package (round-trip, content types, relationship resolution, slide
 Severities: `error` (PowerPoint may refuse the file), `warning` (a defect the user would notice), `info` (advisories — notably the font caveat below). It runs on every export too, as a non-blocking `"structure"` summary, and it is fast: no rendering, no model call.
 
 Empty placeholders are deliberately **not** reported: PowerPoint draws their prompt text only in edit view, so they are invisible in a slideshow and in the PDF, and a template has dozens.
+
+### Brand rules (optional, per deployment)
+
+A brand is not a property of a deck, it is a property of the organisation the deck is for — so the repo ships the engine and the deployment supplies the rules. The rules live **in DIAL file storage beside the template and the icons**, and the server is told only their **file name**:
+
+```
+BRAND_PROFILE_FILE=brand_profile.json
+BRAND_REFERENCE_DECK_FILE=brand_reference.pptx     # optional
+```
+
+Not a bucket path, because buckets move — a file is re-uploaded, storage is reorganised, a deployment is rebuilt — and a server pinned to `files/{bucket}/…` stops finding its own rules. The name is the stable half of the contract; the orchestrator holds the other half. It can see which files it has access to, so it resolves the name to a URL and hands it over once per deck:
+
+```
+attach_brand_profile(presentation_id=…,
+                     profile_url="files/{bucket}/{path}/brand_profile.json",
+                     reference_deck_url="files/{bucket}/{path}/brand_reference.pptx")
+```
+
+That is also what makes the file readable at all: DIAL Quick Apps grants the request's key access to the files named by `dial_url` parameters and to nothing else, so a file the server fetched from a path of its own would come back `403` — the same mechanism `add_image_from_dial_url` relies on.
+
+The tool returns the rules it read, so the agent can **build** to them rather than only be judged by them, and binds them to that deck. From then on:
+
+1. **`validate_brand_profile(presentation_id, min_severity?)`** checks the deck — allowed fonts, a minimum point size, an approved palette, a safe area content must stay inside (well inside the slide edge `validate_presentation` checks), chrome every slide must carry, and a cap on how many slides in a row may share one background family. Deterministic, no model call, and each finding names the slide, the shape and the fix, which is what a vision reviewer cannot give you: it can say text looks small, not that it is 12pt against a 14pt floor.
+2. **The profile's `review_notes` become the vision reviewer's focus** on every inspect, repair and export-gate call — where the rules no measurement can express live ("a headline must state a message, not a topic label", "no slide may be plain text on white"), as strings in the profile rather than code in this repo. The reference deck, if attached, is shown to the reviewer as the template to match.
+3. **Export reports a non-blocking `"brand"` summary**, next to `"structure"`. A house style is not a reason to refuse a finished deck.
+
+**Which file is accepted.** Only one named as configured: `attach_brand_profile` compares the *name* at the end of the URL and refuses anything else, before fetching. The path, bucket and host are the orchestrator's business; the name is the operator's. That check is what stands between "the brand profile" and any JSON file the caller happens to have — which matters because `review_notes` becomes prompt text for the reviewer.
+
+**Brand context belongs to the deck**, not to the server: it is held beside the Presentation, expires with it, and is never shared between decks. One caller's profile can therefore never steer another caller's review.
+
+**When rules are configured but never attached**, the deck is not silently treated as compliant: `validate_brand_profile` returns an error naming the file to look for, the QA tools review without the rules and return a `brand_note`, and export delivers the deck with `"brand": {"validated": false}` and a note. Nothing blocks — a finished deck is never withheld over missing rules — but nothing pretends either.
 
 ### Design guidance
 

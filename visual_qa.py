@@ -479,6 +479,19 @@ def _slide_cap():
     return int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
 
 
+def _image_order_note(ref_count: int, deck_count: int) -> str:
+    """Tell the reviewer which images are the template and which are the deck.
+
+    Both entry points prepend the reference's images to the same request, so
+    without this the reviewer reports issues against the template's own slides.
+    """
+    return (
+        f"\nImage order: images 1-{ref_count} are the reference template; "
+        f"images {ref_count + 1}-{ref_count + deck_count} are the deck under "
+        "review. Report issue slide numbers relative to the deck under review."
+    )
+
+
 def inspect_presentation(pres, reference_pres=None, focus: str = None,
                          slides: list = None) -> dict:
     """Render a python-pptx Presentation (and optional reference) and return
@@ -499,12 +512,7 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
     prompt = review_prompt(bool(ref_images), focus, slides,
                            fonts.unreliable_fonts_in(pres))
     if ref_images:
-        prompt += (
-            f"\nImage order: images 1-{len(ref_images)} are the reference "
-            f"template; images {len(ref_images) + 1}-"
-            f"{len(ref_images) + len(deck_images)} are the deck under review. "
-            "Report issue slide numbers relative to the deck under review."
-        )
+        prompt += _image_order_note(len(ref_images), len(deck_images))
     verdict = llm.review(ref_images + deck_images, prompt)
     verdict["slides_reviewed"] = slides or len(deck_images)
     logger.info("inspection_done slides=%d scope=%s reference=%s passed=%s "
@@ -516,7 +524,7 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
 
 
 def inspect_and_repair(pres, slides: list = None, focus: str = None,
-                       max_iterations: int = None) -> dict:
+                       max_iterations: int = None, reference_pres=None) -> dict:
     """Inspect/repair loop: inspect the selected slides; on failure, repair
     them in place via LLM-planned whitelisted operations (visual_fix.py) and
     inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 10) inspections.
@@ -525,6 +533,10 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     Repairs are confined to the reviewed slides — issues reported against
     other slides are ignored, so a caller iterating slide by slide never has
     the model rewrite a slide it did not ask about.
+
+    reference_pres: a deck to show the reviewer as the template to match. It
+    is rendered once and prepended to every round's images; the repair planner
+    never sees it, since nothing on it can be repaired.
 
     Returns {"passed": bool, "iterations": n, "repair_rounds": [...],
     "issues": [...]} — "issues" holds what remains when passed is False.
@@ -539,8 +551,11 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     max_iterations = max(1, max_iterations)
 
     # Constant for the whole loop: repairs never change which fonts the deck
-    # names, and re-scanning per round would only cost time.
+    # names, and re-scanning per round would only cost time. The reference
+    # deck is not repaired either, so it is rendered once.
     risky_fonts = fonts.unreliable_fonts_in(pres)
+    ref_images = _render_deck(reference_pres, _slide_cap()) \
+        if reference_pres is not None else []
     repair_rounds = []
     verdict = {}
     loop_started = time.monotonic()
@@ -553,8 +568,10 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = slides or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images,
-                             review_prompt(False, focus, slides, risky_fonts))
+        prompt = review_prompt(bool(ref_images), focus, slides, risky_fonts)
+        if ref_images:
+            prompt += _image_order_note(len(ref_images), len(deck_images))
+        verdict = llm.review(ref_images + deck_images, prompt)
         verdict["slides_reviewed"] = slides or len(deck_images)
         issues = [i for i in verdict.get("issues", [])
                   if not slides or i.get("slide") in slides]
