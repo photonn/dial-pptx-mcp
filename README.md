@@ -167,6 +167,7 @@ python-pptx's only entry point is `slides.add_slide(layout)`, which appends a ba
 | `move_slide(presentation_id, slide_index, new_index)` | Reorders |
 | `copy_slide_between_presentations(source, slide_index, target, ...)` | Merges decks. Everything the slide references is cloned into the target package; inherited theme colours and fonts re-resolve against the *target* master, so the copy is worth inspecting |
 | `manage_speaker_notes(presentation_id, operation, slide_index?, text?)` | `get` / `set` / `clear`. Notes belong in the notes pane — a "notes" textbox is visible to the audience |
+| `add_slide_numbers(presentation_id, skip_slides?)` | Copies each slide's layout slide-number placeholder onto the slide. python-pptx never clones it, so a template that positions and styles its page numbers still produces a deck with none. Call it once after the last slide; slides whose layout defines no such placeholder are skipped, which is how a template says "no number on the title slide" |
 
 The recommended flow for template work is **duplicate, then fill**: find the template slide whose structure fits the content, duplicate it, and replace the text.
 
@@ -174,7 +175,7 @@ The recommended flow for template work is **duplicate, then fill**: find the tem
 
 `validate_presentation(presentation_id, min_severity?)` is the axis visual QA cannot see. A deck with a dangling relationship or a chart with no series renders in LibreOffice and opens in python-pptx — the two things the visual pass relies on — and still arrives broken.
 
-It checks the package (round-trip, content types, relationship resolution, slide ids, notes parts shared between slides, orphan parts) and the slides (shapes off the canvas or zero-sized, charts with no data or mismatched series lengths, empty tables, pictures stretched off their aspect ratio, leftover placeholder text such as `Lorem ipsum` / `Click to add title` / `TODO` / `[insert ...]`). Each problem names the slide, the shape, what is wrong and the tool that fixes it.
+It checks the package (round-trip, content types, relationship resolution, slide ids, notes parts shared between slides, orphan parts) and the slides (shapes off the canvas or zero-sized, charts with no data or mismatched series lengths, empty tables, pictures stretched off their aspect ratio, pictures whose transparency was flattened into a flat opaque background sitting on a differently coloured shape, leftover placeholder text such as `Lorem ipsum` / `Click to add title` / `TODO` / `[insert ...]`). Each problem names the slide, the shape, what is wrong and the tool that fixes it.
 
 Severities: `error` (PowerPoint may refuse the file), `warning` (a defect the user would notice), `info` (advisories — notably the font caveat below). It runs on every export too, as a non-blocking `"structure"` summary, and it is fast: no rendering, no model call.
 

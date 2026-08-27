@@ -66,13 +66,22 @@ with a dangling rId renders in LibreOffice and opens in python-pptx and still fa
 the tool that resolves it, and `_structure_summary` folds it into export **without blocking** — refusing to deliver a
 finished deck over a warning costs the user more than the warning does. Empty placeholders are deliberately not
 reported: PowerPoint draws their prompt text only in edit view, and flagging all 68 of them on the demo fixture buried
-the two real findings.
+the two real findings. `_check_picture_backgrounds` is the one check that decodes pixels: a picture whose transparency
+was flattened shows a hard rectangle on a card of another colour. It fires only when the four corners are opaque *and*
+all one colour (a photo's corners are not) and that colour differs from the fill beneath, and it only decodes pictures
+that actually overlap a solid non-white fill *below* them in z-order, so a normal deck pays nothing.
 
 **Fonts (`fonts.py`).** Visual QA renders through LibreOffice, so its text-fit verdicts are only trustworthy for fonts
 with metric-compatible substitutes (Liberation Sans/Serif/Mono, Carlito, Caladea). Everything else is substituted by
 similarity and the widths differ. `unreliable_fonts_in` drives both an `info` problem in validation and a caveat
 appended to `REVIEW_PROMPT`, telling the reviewer to report only substantial overflow for text in those fonts. Do not
 "fix" a template's fonts to satisfy QA — brand beats QA precision, which is what the caveat exists to make possible.
+
+**Slide numbers (`tools/slide_number_tools.py`).** `iter_cloneable_placeholders` excludes date/footer/slide-number
+placeholders, so a template that positions and styles its page numbers produces a deck with none, and `duplicate_slide`
+propagates the gap. `add_slide_numbers` deep-copies the layout's own `sldNum` element onto each slide — what PowerPoint
+does when you tick "Slide number". A layout without the placeholder is a template saying "no number here"; leave those
+alone.
 
 **Design guidance (`docs/DESIGN_GUIDANCE.md`, `tools/guidance_tools.py`).** The tools answer "how do I place this";
 nothing answered "what should this slide look like". The document is the single source of truth (read from disk,

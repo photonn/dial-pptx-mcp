@@ -41,6 +41,7 @@ from tools import (
     register_visual_tools,
     register_image_tools,
     register_slide_tools,
+    register_slide_number_tools,
     register_validation_tools,
     register_guidance_tools,
     register_preview_tools
@@ -337,6 +338,11 @@ register_image_tools(
 )
 
 register_slide_tools(
+    app,
+    presentations
+)
+
+register_slide_number_tools(
     app,
     presentations
 )

@@ -10,6 +10,7 @@ import unittest
 
 from pptx import Presentation
 from pptx.oxml.ns import qn
+from pptx.dml.color import RGBColor
 from pptx.util import Inches, Pt
 
 import deck_validation
@@ -313,6 +314,91 @@ class TestPictureDistortion(unittest.TestCase):
         self.assertNotIn("distorted_picture", codes(report))
 
 
+class TestPictureBackgrounds(unittest.TestCase):
+    """The flattened-icon defect: opaque white artwork on a coloured card."""
+
+    def _slide_with_card(self, pres=None):
+        pres = pres or blank_deck()
+        slide = pres.slides[0]
+        card = slide.shapes.add_shape(1, Inches(1), Inches(1), Inches(3),
+                                      Inches(3))
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(0, 93, 185)
+        return pres, slide
+
+    def test_an_opaque_white_icon_on_a_coloured_card_is_reported(self):
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_square_png(opaque=True), Inches(2),
+                                 Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertIn("opaque_picture_background", codes(report, "warning"))
+        self.assertTrue(report["ok"], "this is a defect, not a broken file")
+
+    def test_a_transparent_icon_is_not_reported(self):
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_square_png(opaque=False), Inches(2),
+                                 Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+    def test_an_opaque_icon_that_misses_the_card_is_not_reported(self):
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_square_png(opaque=True), Inches(5),
+                                 Inches(5), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+    def test_a_picture_below_the_fill_is_not_reported(self):
+        """Z-order matters: a card drawn over a picture hides it entirely."""
+        pres = blank_deck()
+        slide = pres.slides[0]
+        slide.shapes.add_picture(_square_png(opaque=True), Inches(2),
+                                 Inches(2), Inches(1), Inches(1))
+        card = slide.shapes.add_shape(1, Inches(1), Inches(1), Inches(3),
+                                      Inches(3))
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(0, 93, 185)
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+    def test_a_flattened_coloured_background_is_reported_too(self):
+        """Not only white: any flat pane that is not the fill under it."""
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_square_png(opaque=True, background=(240, 235,
+                                                                     220)),
+                                 Inches(2), Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertIn("opaque_picture_background", codes(report, "warning"))
+
+    def test_corners_matching_the_fill_are_left_alone(self):
+        """Nothing to see: the pane and the card are the same colour."""
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_square_png(opaque=True,
+                                             background=(0, 93, 185)),
+                                 Inches(2), Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+    def test_a_photo_with_four_unrelated_corners_is_not_reported(self):
+        pres, slide = self._slide_with_card()
+        slide.shapes.add_picture(_four_corner_png(), Inches(2), Inches(2),
+                                 Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+    def test_a_white_card_is_not_a_coloured_background(self):
+        pres = blank_deck()
+        slide = pres.slides[0]
+        card = slide.shapes.add_shape(1, Inches(1), Inches(1), Inches(3),
+                                      Inches(3))
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        slide.shapes.add_picture(_square_png(opaque=True), Inches(2),
+                                 Inches(2), Inches(1), Inches(1))
+        report = deck_validation.validate_presentation(pres)
+        self.assertNotIn("opaque_picture_background", codes(report))
+
+
 class TestFontAdvisory(unittest.TestCase):
     def test_metric_safe_fonts(self):
         for name in ("Arial", "calibri", "Times New Roman", "Cambria"):
@@ -375,6 +461,40 @@ class TestFontAdvisory(unittest.TestCase):
         prompt = visual_qa.review_prompt(False, None, None, {"Georgia"})
         self.assertIn("Georgia", prompt)
         self.assertNotIn("Georgia", visual_qa.review_prompt(False))
+
+
+def _four_corner_png(size=64):
+    """A picture whose corners are four different colours, as a photo's are."""
+    from PIL import Image
+
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+    half = size // 2
+    for box, colour in (((0, 0, half, half), (200, 30, 30)),
+                        ((half, 0, size, size), (30, 200, 30)),
+                        ((0, half, half, size), (30, 30, 200))):
+        image.paste(colour + (255,), box)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def _square_png(opaque=True, size=64, background=(255, 255, 255)):
+    """A square PNG with a flat background — opaque or fully transparent.
+
+    The middle is always dark, so the artwork itself is visible either way and
+    only the corners decide the verdict.
+    """
+    from PIL import Image, ImageDraw
+
+    alpha = 255 if opaque else 0
+    image = Image.new("RGBA", (size, size), background + (alpha,))
+    ImageDraw.Draw(image).ellipse((size // 4, size // 4, 3 * size // 4,
+                                   3 * size // 4), fill=(0, 0, 0, 255))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
 
 
 def _one_pixel_png():

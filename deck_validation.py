@@ -76,6 +76,17 @@ _SLIDE_ID_MAX = 2147483647
 # so it is worth catching here rather than in the visual loop.
 _ASPECT_TOLERANCE = 0.08
 
+# An icon whose transparency was flattened shows as a rectangle once it is
+# placed on a coloured card. Corner pixels at or above this alpha are opaque,
+# and four corners within this per-channel distance of each other are a flat
+# pane of one colour — the background the artwork was flattened against —
+# rather than four unrelated corners of a photograph.
+_OPAQUE_ALPHA = 250
+_UNIFORM_CORNERS = 12
+# Corners are sampled a little inside the edge: a flattened icon often keeps a
+# single row of stray antialiasing at the very border.
+_CORNER_INSET = 0.02
+
 
 def _inches(emu):
     return round(emu / EMU_PER_INCH, 2)
@@ -374,6 +385,117 @@ def _check_picture(slide_index, shape_index, shape, report):
                    slide=slide_index, shape=shape_index)
 
 
+def _solid_fill_rgb(shape):
+    """The shape's solid fill as an (r, g, b) tuple, or None.
+
+    A theme-coloured fill cannot be resolved to RGB without walking the theme,
+    so it is reported as its role instead: the two light roles are treated as
+    "white enough to hide nothing", everything else as a colour an opaque
+    picture would sit on top of.
+    """
+    from pptx.enum.dml import MSO_COLOR_TYPE, MSO_FILL, MSO_THEME_COLOR
+
+    try:
+        fill = shape.fill
+        if fill.type != MSO_FILL.SOLID:
+            return None
+        color = fill.fore_color
+        if color.type == MSO_COLOR_TYPE.RGB:
+            return tuple(color.rgb)
+        if color.theme_color in (MSO_THEME_COLOR.BACKGROUND_1,
+                                 MSO_THEME_COLOR.LIGHT_1):
+            return (255, 255, 255)
+        return None if color.theme_color is None else (0, 0, 0)
+    except Exception:
+        return None
+
+
+def _overlaps(a, b):
+    for attr in ("left", "top", "width", "height"):
+        if getattr(a, attr, None) is None or getattr(b, attr, None) is None:
+            return False
+    return (a.left < b.left + b.width and b.left < a.left + a.width
+            and a.top < b.top + b.height and b.top < a.top + a.height)
+
+
+def _corner_pixels(blob):
+    """The four corner pixels of an image, as RGBA tuples, or None."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(blob)) as image:
+        image = image.convert("RGBA")
+        width, height = image.size
+        if width < 4 or height < 4:
+            return None
+        x = max(1, int(width * _CORNER_INSET))
+        y = max(1, int(height * _CORNER_INSET))
+        return [image.getpixel(p) for p in
+                ((x, y), (width - 1 - x, y),
+                 (x, height - 1 - y), (width - 1 - x, height - 1 - y))]
+
+
+def _check_picture_backgrounds(slide_index, slide, report):
+    """Report a picture with a baked-in white background sitting on a fill.
+
+    This is the icon failure mode: artwork exported with its transparency
+    flattened against a background looks fine on a slide of that colour and
+    shows a hard rectangle the moment it is placed on a card or panel of
+    another. Neither pass catches it today — the render shows it, but a vision
+    reviewer reads it as part of the design, and nothing else inspects alpha
+    channels.
+
+    Reported when the four corners are opaque *and* all one colour, which is
+    what a flattened background looks like and what the corners of a photo do
+    not. A picture whose corners already match the fill beneath it is left
+    alone: there is nothing to see.
+
+    Only pictures that actually overlap a solid, non-white fill *behind* them
+    are decoded, so the usual deck pays nothing for the check.
+    """
+    shapes = list(slide.shapes)
+    fills = [(index, _solid_fill_rgb(shape))
+             for index, shape in enumerate(shapes)]
+    fills = [(index, rgb) for index, rgb in fills
+             if rgb is not None and rgb != (255, 255, 255)]
+    if not fills:
+        return
+
+    for shape_index, shape in enumerate(shapes):
+        if shape.shape_type != 13:  # PICTURE
+            continue
+        behind = [index for index, _ in fills
+                  if index < shape_index and _overlaps(shape, shapes[index])]
+        if not behind:
+            continue
+        try:
+            corners = _corner_pixels(shape.image.blob)
+        except Exception as e:
+            logger.debug("picture_alpha_skipped slide=%d shape=%d error=%s",
+                          slide_index, shape_index, e)
+            continue
+        if not corners:
+            continue
+        if not all(pixel[3] >= _OPAQUE_ALPHA for pixel in corners):
+            continue
+        first = corners[0][:3]
+        if not all(abs(channel - first[i]) <= _UNIFORM_CORNERS
+                   for pixel in corners for i, channel in
+                   enumerate(pixel[:3])):
+            continue  # four different corners: artwork, not a flat pane
+        against = dict(fills)[behind[0]]
+        if all(abs(a - b) <= _UNIFORM_CORNERS for a, b in zip(first, against)):
+            continue  # the same colour as the fill: invisible either way
+        report.add(WARNING, "opaque_picture_background",
+                   f"Slide {slide_index}, shape {shape_index} "
+                   f"('{shape.name}') has an opaque {list(first)} background "
+                   f"and sits on the differently coloured shape {behind[0]}, "
+                   f"so it shows as a rectangle rather than blending into it.",
+                   "Use a version of the image with a transparent background, "
+                   "or move it onto a white area — visual repair can move and "
+                   "delete a picture but cannot remove its background.",
+                   slide=slide_index, shape=shape_index)
+
+
 def _check_chart(slide_index, shape_index, shape, report):
     chart = shape.chart
     try:
@@ -465,6 +587,11 @@ def _check_slides(pres, report):
             except Exception as e:
                 logger.debug("shape_check_skipped slide=%d shape=%d error=%s",
                              slide_index, shape_index, e)
+        try:
+            _check_picture_backgrounds(slide_index, slide, report)
+        except Exception as e:
+            logger.debug("picture_background_check_skipped slide=%d error=%s",
+                         slide_index, e)
 
 
 def _check_fonts(pres, report):
