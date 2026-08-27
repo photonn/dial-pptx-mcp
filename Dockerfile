@@ -5,9 +5,12 @@ RUN useradd --create-home --uid 1000 appuser
 WORKDIR /app
 
 # LibreOffice renders slides to PDF for the visual-inspection tool.
-# Common free fonts reduce font-substitution drift in renders.
+# Common free fonts reduce font-substitution drift in renders: Liberation and
+# Croscore are metric-compatible with the Microsoft core faces, and Noto covers
+# the faces corporate templates most often name. A font the renderer has to
+# substitute is a font whose text-fit verdicts cannot be trusted (see fonts.py).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libreoffice-impress fonts-liberation fonts-dejavu \
+        libreoffice-impress fonts-liberation fonts-dejavu fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
