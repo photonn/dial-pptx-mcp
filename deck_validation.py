@@ -389,9 +389,13 @@ def _solid_fill_rgb(shape):
     """The shape's solid fill as an (r, g, b) tuple, or None.
 
     A theme-coloured fill cannot be resolved to RGB without walking the theme,
-    so it is reported as its role instead: the two light roles are treated as
-    "white enough to hide nothing", everything else as a colour an opaque
-    picture would sit on top of.
+    so it is approximated by role: the two light roles become white, and every
+    other theme colour becomes black — not because it is black, but because
+    the callers only ask two questions of this value ("is it white?" and "does
+    an icon's background match it?") and black is the conservative answer to
+    the second. An icon whose corners really are black over an unresolved
+    theme fill is passed over rather than reported; a false negative on a
+    heuristic warning costs less than crying wolf on a deck that is fine.
     """
     from pptx.enum.dml import MSO_COLOR_TYPE, MSO_FILL, MSO_THEME_COLOR
 

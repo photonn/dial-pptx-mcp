@@ -51,10 +51,12 @@ PROFILE = {
 class _FakeApp:
     def __init__(self):
         self.tools = {}
+        self.annotations = {}
 
     def tool(self, **kwargs):
         def decorator(fn):
             self.tools[fn.__name__] = fn
+            self.annotations[fn.__name__] = kwargs.get("annotations")
             return fn
         return decorator
 
@@ -476,6 +478,23 @@ class TestRegistration(unittest.TestCase):
         register_brand_tools(app, PresentationStore())
         self.assertEqual(sorted(app.tools),
                          ["attach_brand_profile", "validate_brand_profile"])
+
+    def test_attaching_rules_stales_an_earlier_inspection(self):
+        """attach_brand_profile is not read-only, and the dirty-marking
+        wrapper keys off that. The rules change what the reviewer is told to
+        look for and give it a reference deck, so a deck inspected clean
+        before they arrived was judged against different criteria — exporting
+        it as "passed" would credit it with a review that never saw the
+        brand. Checking the deck against the rules changes nothing, so
+        validate_brand_profile stays read-only."""
+        os.environ["BRAND_PROFILE_FILE"] = "brand_profile.json"
+        app = _FakeApp()
+        register_brand_tools(app, PresentationStore())
+        self.assertNotEqual(
+            getattr(app.annotations["attach_brand_profile"],
+                    "readOnlyHint", None), True)
+        self.assertTrue(
+            app.annotations["validate_brand_profile"].readOnlyHint)
 
 
 class TestFileNameMatching(unittest.TestCase):

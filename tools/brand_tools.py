@@ -180,10 +180,16 @@ def register_brand_tools(app: FastMCP, presentations):
         Returns the rules themselves, so you can build to them rather than
         only be judged by them.
         """
+    # Deliberately not readOnlyHint: attaching writes brand context to the
+    # deck, and that context is what the visual reviewer is given (the
+    # profile's review_notes as focus, the reference deck to compare
+    # against). A deck inspected clean before the rules arrived was judged
+    # against different criteria, so the wrapper marking it for
+    # re-inspection is right — export would otherwise report "passed" for a
+    # review that never saw the brand.
     app.tool(
         annotations=ToolAnnotations(
             title="Attach Brand Profile",
-            readOnlyHint=True,
         ),
     )(attach_brand_profile)
 
