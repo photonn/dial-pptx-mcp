@@ -469,7 +469,7 @@ def fail_open_on_error() -> bool:
 
 def _subset_deck_bytes(pres, slides):
     """Serialize a copy of `pres` containing only the given 1-based slides,
-    in that order.
+    kept in their original deck order (not the order of `slides`).
 
     LibreOffice always converts the whole file it is given, so trimming here
     — before the file ever reaches soffice — is what actually cuts render
