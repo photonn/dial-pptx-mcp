@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dial-pptx-mcp"
-version = "2.5.0"
+version = "2.6.0"
 description = "Remote, multi-tenant PowerPoint-generation MCP server for EPAM AI DIAL, extending Office-PowerPoint-MCP-Server"
 readme = "README.md"
 license = {file = "LICENSE"}
