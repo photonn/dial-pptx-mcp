@@ -16,6 +16,11 @@ ENV = {
 }
 
 
+def _slide_has_text(slide, needle):
+    return any(shape.has_text_frame and needle in shape.text_frame.text
+              for shape in slide.shapes)
+
+
 class WithEnv(unittest.TestCase):
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in ENV}
@@ -217,6 +222,37 @@ class TestRendering(unittest.TestCase):
         self.assertNotEqual(only_second[0], both[0])
         # Out-of-range selections are dropped, not fatal.
         self.assertEqual(render_pptx_bytes_to_pngs(data, slides=[9999]), [])
+
+    def test_render_deck_with_slides_converts_a_stripped_copy(self):
+        import shutil
+        from pptx import Presentation
+        if not (os.environ.get("SOFFICE_PATH") or shutil.which("soffice")):
+            self.skipTest("LibreOffice not installed")
+        import visual_qa
+        pres = Presentation(str(Path(__file__).resolve().parent.parent /
+                                "mcp_all_tools_templates_effects_demo.pptx"))
+        images = visual_qa._render_deck(pres, slides=[2])
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].startswith(b"\x89PNG"))
+        # pres itself must be untouched: still all 34 slides, in order.
+        self.assertEqual(len(pres.slides), 34)
+        self.assertTrue(_slide_has_text(pres.slides[1], "Transform Your Business"))
+
+
+class TestSubsetDeckBytes(unittest.TestCase):
+    def test_keeps_only_requested_slides_in_order(self):
+        from pptx import Presentation
+        import io
+        import visual_qa
+        pres = Presentation(str(Path(__file__).resolve().parent.parent /
+                                "mcp_all_tools_templates_effects_demo.pptx"))
+        subset_bytes = visual_qa._subset_deck_bytes(pres, [3, 8])
+        subset = Presentation(io.BytesIO(subset_bytes))
+        self.assertEqual(len(subset.slides), 2)
+        self.assertTrue(_slide_has_text(subset.slides[0], "Agenda"))
+        self.assertTrue(_slide_has_text(subset.slides[1], "Performance Dashboard"))
+        # Original presentation object is untouched.
+        self.assertEqual(len(pres.slides), 34)
 
 
 if __name__ == "__main__":

@@ -467,8 +467,42 @@ def fail_open_on_error() -> bool:
     return os.environ.get("VISUAL_QA_ON_ERROR", "block").lower() == "allow"
 
 
+def _subset_deck_bytes(pres, slides):
+    """Serialize a copy of `pres` containing only the given 1-based slides,
+    kept in their original deck order (not the order of `slides`).
+
+    LibreOffice always converts the whole file it is given, so trimming here
+    — before the file ever reaches soffice — is what actually cuts render
+    time for a slide-scoped inspect/repair call, instead of converting the
+    full deck and discarding the unwanted pages afterward. Operates on a
+    freshly reopened copy so the caller's live `pres` (and its bound
+    `shapes`/spTree state, see CLAUDE.md) is never touched.
+    """
+    import io
+    from pptx import Presentation
+    from utils import delete_slide
+
+    buf = io.BytesIO()
+    pres.save(buf)
+    buf.seek(0)
+    subset = Presentation(buf)
+    keep = set(slides)
+    for index in range(len(subset.slides) - 1, -1, -1):
+        if (index + 1) not in keep:
+            delete_slide(subset, index)
+    out = io.BytesIO()
+    subset.save(out)
+    return out.getvalue()
+
+
 def _render_deck(pres, max_slides=None, slides=None):
     import io
+    if slides:
+        # slides is always pre-sorted (normalize_slides / the repair loop's
+        # own image_slides), so the subset deck's page order already matches
+        # what callers expect back — no slides= filtering needed downstream.
+        return render_pptx_bytes_to_pngs(_subset_deck_bytes(pres, slides),
+                                         max_slides=max_slides)
     buf = io.BytesIO()
     pres.save(buf)
     return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides,
