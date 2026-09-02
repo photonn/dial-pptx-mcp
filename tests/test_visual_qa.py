@@ -183,6 +183,19 @@ class TestDialProvider(unittest.TestCase):
         os.environ.pop("DIAL_CORE_URL")
         self.assertFalse(visual_qa.enforcement_enabled())
 
+    def test_the_enforce_switch_hides_the_qa_tools_not_the_model(self):
+        """Slide inspection is off, but the model is still there for features
+        that only use it — the icon review."""
+        import visual_qa
+        os.environ["VISUAL_QA_ENFORCE"] = "false"
+        try:
+            self.assertTrue(visual_qa.vision_configured())
+            self.assertFalse(visual_qa.enforcement_enabled())
+            os.environ.pop("DIAL_CORE_URL")
+            self.assertFalse(visual_qa.vision_configured())
+        finally:
+            os.environ.pop("VISUAL_QA_ENFORCE")
+
 
 class TestPrompt(unittest.TestCase):
     def test_reference_and_focus_wording(self):

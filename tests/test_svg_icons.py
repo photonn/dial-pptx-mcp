@@ -207,7 +207,7 @@ class TestIconTool(unittest.TestCase):
         kwargs.setdefault("svg", ICON)
         kwargs.setdefault("size", 200)
         with patch("dial_client.DialFileClient", FakeDialClient), \
-             patch.object(visual_qa, "enforcement_enabled",
+             patch.object(visual_qa, "vision_configured",
                           return_value=verdict is not None), \
              patch.object(svg_icons, "review_icon", return_value=verdict):
             return self.render(**kwargs)
@@ -248,9 +248,23 @@ class TestIconTool(unittest.TestCase):
         self.assertIn("image_url", result)
         self.assertIn("No vision model", result["review_note"])
 
+    def test_the_slide_qa_switch_does_not_turn_off_the_icon_review(self):
+        """VISUAL_QA_ENFORCE hides the slide inspect/repair tools; whether one
+        icon can be looked at depends on the model existing, not on that."""
+        with patch.dict("os.environ", {"VISUAL_QA_ENFORCE": "false",
+                                       "VISION_LLM_MODEL": "gpt-4o",
+                                       "VISION_LLM_PROVIDER": "dial",
+                                       "DIAL_CORE_URL": "https://dial.test"}), \
+             patch("dial_client.DialFileClient", FakeDialClient), \
+             patch.object(svg_icons, "review_icon",
+                          return_value={"passed": True, "issues": []}) as review:
+            result = self.render(svg=ICON, size=200)
+        self.assertTrue(review.called)
+        self.assertEqual(result["review"]["passed"], True)
+
     def test_an_unreachable_reviewer_is_a_note_not_a_failure(self):
         with patch("dial_client.DialFileClient", FakeDialClient), \
-             patch.object(visual_qa, "enforcement_enabled", return_value=True), \
+             patch.object(visual_qa, "vision_configured", return_value=True), \
              patch.object(svg_icons, "review_icon",
                           side_effect=visual_qa.VisualQAError("endpoint down")):
             result = self.render(svg=ICON, size=200)
@@ -275,7 +289,7 @@ class TestIconTool(unittest.TestCase):
                 raise RuntimeError("no bucket")
 
         with patch("dial_client.DialFileClient", Broken), \
-             patch.object(visual_qa, "enforcement_enabled", return_value=False):
+             patch.object(visual_qa, "vision_configured", return_value=False):
             result = self.render(svg=ICON, size=200)
         self.assertIn("error", result)
         self.assertIn("no bucket", result["error"])

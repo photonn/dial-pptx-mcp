@@ -63,7 +63,7 @@ def register_icon_tools(app: FastMCP):
     import svg_icons
     import visual_qa
 
-    logger.info("icon_tools_registered review=%s", visual_qa.enforcement_enabled())
+    logger.info("icon_tools_registered review=%s", visual_qa.vision_configured())
 
     @app.tool(
         annotations=ToolAnnotations(
@@ -175,7 +175,10 @@ def register_icon_tools(app: FastMCP):
 
         verdict = None
         if review:
-            if not visual_qa.enforcement_enabled():
+            # vision_configured(), not enforcement_enabled(): VISUAL_QA_ENFORCE
+            # switches off slide inspection and repair, which is a different
+            # decision from whether a model exists to look at one icon.
+            if not visual_qa.vision_configured():
                 result["review_note"] = (
                     "No vision model is configured on this server, so the "
                     "icon could not be checked. Place it if you are confident "

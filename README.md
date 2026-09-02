@@ -51,7 +51,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_PROVIDER` | no | auto | Force the backend: `direct` or `dial` (default: `direct` when `VISION_LLM_ENDPOINT` is set, else `dial`) |
 | `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
 | `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per whole-deck inspection (an explicit `slides` list is never capped) |
-| `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely |
+| `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely. It governs slide inspection only — `render_svg_icon` still reviews an icon whenever a vision model is configured |
 | `VISUAL_QA_MAX_ITERATIONS` | no | `10` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
 | `VISUAL_QA_EXPORT_GATE` | no | `false` | `true` also runs a whole-deck inspect-repair loop inside export/save and refuses unverified decks |
 | `VISUAL_QA_ON_UNRESOLVED` | no | `report` | Export gate only: `report` fails the export with the issue list, `export_as_is` ships the deck |
@@ -171,7 +171,7 @@ Two checks run before the model is asked anything, because they name the defect 
 
 **Input is untrusted.** The SVG is written by a model and parsed in this process, so `render_svg_icon` refuses DOCTYPE/ENTITY declarations (the XXE shape), `<script>`, `<foreignObject>`, embedded `<image>`, event-handler attributes, and any `href`/`url()` that leaves the document — an SVG that fetches is an SSRF primitive just like a URL parameter. Text elements are refused too, for a second reason: glyphs would come from whatever font the rasterizer substitutes, which is exactly the artifact class this feature exists to catch. Line art only — `<path>`, `<circle>`, `<rect>`, `<line>`, `<polyline>`, `<polygon>`.
 
-Rendering is PyMuPDF, already a dependency for the QA rasterizer, so icons work wherever the server runs — no LibreOffice, no new native library. Only the review needs a vision model; without one the icon still ships, with a note saying it was not checked.
+Rendering is PyMuPDF, already a dependency for the QA rasterizer, so icons work wherever the server runs — no LibreOffice, no new native library. Only the review needs a vision model; without one the icon still ships, with a note saying it was not checked. That check follows the model, not `VISUAL_QA_ENFORCE`: switching off slide inspection and repair is a different decision from whether one icon can be looked at.
 
 **Telling the agent to use it.** Drawing is the orchestrator's job, so it belongs in the Quick App's system prompt:
 
@@ -340,7 +340,7 @@ Per-slide checks are the cheap path — one render plus one vision call each, ca
 | Slides actually reviewed | `VISION_LLM_MAX_SLIDES` (default 15) caps whole-deck calls only; an explicit `slides` list is never truncated |
 | Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails every QA call |
 
-`VISUAL_QA_ENFORCE=false` registers neither tool and turns the feature off. The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each inspect is one render plus one LLM call; each repair round adds a second LLM call.
+`VISUAL_QA_ENFORCE=false` registers neither tool and turns slide QA off (the icon review in `render_svg_icon` is unaffected — it follows the model's presence). The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each inspect is one render plus one LLM call; each repair round adds a second LLM call.
 
 ## Logging
 
