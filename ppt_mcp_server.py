@@ -358,7 +358,8 @@ register_preview_tools(
 )
 
 register_icon_tools(
-    app
+    app,
+    presentations
 )
 
 

@@ -2,7 +2,7 @@
 
 How to draw an icon as SVG for `render_svg_icon`. You write the SVG; the server
 rasterizes it to a transparent PNG, has the vision model check the render, and
-stores it in DIAL file storage so `add_image_from_dial_url` can place it.
+hands back an `icon_id` that `add_icon_to_slide` places on a slide.
 
 ---
 
@@ -207,14 +207,15 @@ variant; for the filled variant, change the stroke to `#FFFFFF`.
 1. `render_svg_icon(svg=..., concept="cold chain", slide_background="#005DB9")`
    — `concept` is what the reviewer compares the drawing against, so name the
    thing, not the shapes.
-2. Read the `review` in the response. `passed: false` means no icon was
-   stored: fix what the issues name and call again. Two failed attempts means
-   the drawing is too ambitious — cut it to three or four large shapes, or drop
-   the icon rather than shipping a broken one.
-3. Place the returned `image_url` with `add_image_from_dial_url`, in a square
-   box (`width == height`), `fit="contain"`. Roughly 0.7in for an icon in a
-   card, 1.0–1.2in for one that leads a section.
-4. Reuse the same `image_url` wherever that icon repeats. Rendering it again
+2. Read the `review` in the response. `passed: false` means no icon was kept:
+   fix what the issues name and call again. Two failed attempts means the
+   drawing is too ambitious — cut it to three or four large shapes, or drop the
+   icon rather than shipping a broken one.
+3. Place the returned `icon_id` with `add_icon_to_slide` — not
+   `add_image_from_dial_url`, which reads DIAL file storage and is for images
+   your image model generated. `size` is the box's side in inches: roughly 0.7
+   for an icon in a card, 1.0–1.2 for one that leads a section.
+4. Reuse the same `icon_id` wherever that icon repeats. Rendering it again
    costs a vision call and risks getting a subtly different drawing back.
 
 Draw a deck's icons as one batch, in one style, before placing any of them.

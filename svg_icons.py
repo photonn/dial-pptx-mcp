@@ -26,6 +26,9 @@ is a new native library.
 import io
 import os
 import re
+import threading
+import time
+import uuid
 
 from logging_utils import get_logger
 
@@ -47,6 +50,73 @@ MAX_INK_COVERAGE = 0.97
 
 class SvgIconError(RuntimeError):
     pass
+
+
+class IconStore:
+    """Rendered icons, held server-side under unguessable handles.
+
+    An icon does not go through DIAL file storage, and the reason is an
+    identity boundary rather than a size one. A file this server writes lands
+    in `{user}/appdata/{this-deployment}/`, which only the end user and this
+    deployment may read. Placing it again means the *orchestrator* asking DIAL
+    Core to grant that file to the toolset key before the call — and the
+    orchestrator is neither of those two identities, so Core refuses with 403
+    before the tool is even entered. (Exports do not hit this: their URL goes
+    to the end user, who owns the bucket. An image-model PNG does not either:
+    it reaches the conversation as an attachment the orchestrator can see and
+    therefore share.)
+
+    So the bytes stay where they were rendered. The handle is a UUID4
+    capability like a presentation id, and the store is bounded the same way —
+    a remote server must bound its memory.
+    """
+
+    def __init__(self, ttl_seconds=None, max_items=None):
+        self._ttl = ttl_seconds if ttl_seconds is not None else int(
+            os.environ.get("PPT_MCP_STATE_TTL_SECONDS", "3600"))
+        self._max = max_items if max_items is not None else int(
+            os.environ.get("PPT_MCP_MAX_ICONS", "100"))
+        self._lock = threading.RLock()
+        self._items = {}
+
+    def _purge(self):
+        """Caller holds _lock. Expiry first, then LRU down to max size."""
+        now = time.monotonic()
+        for key in [k for k, v in self._items.items()
+                    if now - v["last_used"] > self._ttl]:
+            del self._items[key]
+        while len(self._items) > self._max:
+            oldest = min(self._items, key=lambda k: self._items[k]["last_used"])
+            del self._items[oldest]
+            logger.warning("icon_evicted icon_id=%s reason=lru max=%d",
+                           oldest[:8] + "…", self._max)
+
+    def put(self, png, meta=None):
+        icon_id = uuid.uuid4().hex
+        with self._lock:
+            self._items[icon_id] = {"png": png, "meta": meta or {},
+                                    "last_used": time.monotonic()}
+            self._purge()
+        return icon_id
+
+    def get(self, icon_id):
+        """(png, meta) for a live handle, or None."""
+        with self._lock:
+            self._purge()
+            entry = self._items.get(icon_id)
+            if entry is None:
+                return None
+            entry["last_used"] = time.monotonic()
+            return entry["png"], entry["meta"]
+
+    def __contains__(self, icon_id):
+        with self._lock:
+            self._purge()
+            return icon_id in self._items
+
+    def __len__(self):
+        with self._lock:
+            return len(self._items)
 
 
 # The SVG is written by the calling model and rendered by a parser in this

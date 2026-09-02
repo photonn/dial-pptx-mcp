@@ -1,9 +1,10 @@
 """
-Tests for SVG icon rendering, its guards, and the tool the agent sees.
+Tests for SVG icon rendering, its guards, and the tools the agent sees.
 
 Rasterizing is PyMuPDF, a hard dependency, so these run everywhere — no
-LibreOffice skip. The vision review and the DIAL upload are the two calls that
-leave the process, and both are patched.
+LibreOffice skip. The vision review is the only call that leaves the process,
+and it is patched; nothing here touches DIAL, which is the point of the icon
+store.
 """
 import io
 import sys
@@ -26,19 +27,6 @@ ICON = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
     <polyline points="100,70 100,100 125,110"/>
   </g>
 </svg>"""
-
-
-class FakeDialClient:
-    """Stands in for DialFileClient: returns a file URL, uploads nothing."""
-
-    uploaded = []
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def upload(self, data, filename, folder=None, content_type=None):
-        FakeDialClient.uploaded.append((filename, len(data), content_type))
-        return f"files/test-bucket/{filename}"
 
 
 class TestValidation(unittest.TestCase):
@@ -195,19 +183,29 @@ class TestIconTool(unittest.TestCase):
 
     def setUp(self):
         from mcp.server.fastmcp import FastMCP
+        from pptx import Presentation
+
+        from state import PresentationStore
 
         app = FastMCP(name="test")
-        register_icon_tools(app)
+        self.store = PresentationStore(ttl_seconds=60, max_items=10)
+        self.icons = svg_icons.IconStore(ttl_seconds=60, max_items=10)
+        register_icon_tools(app, self.store, self.icons)
         self.tool = app._tool_manager._tools["render_svg_icon"]
         self.render = self.tool.fn
+        self.place_tool = app._tool_manager._tools["add_icon_to_slide"]
+        self.place = self.place_tool.fn
         self.guidance = app._tool_manager._tools["get_icon_guidance"].fn
-        FakeDialClient.uploaded = []
+
+        pres = Presentation()
+        pres.slides.add_slide(pres.slide_layouts[6])
+        self.pid = self.store.new_id()
+        self.store[self.pid] = pres
 
     def run_tool(self, verdict=None, **kwargs):
         kwargs.setdefault("svg", ICON)
         kwargs.setdefault("size", 200)
-        with patch("dial_client.DialFileClient", FakeDialClient), \
-             patch.object(visual_qa, "vision_configured",
+        with patch.object(visual_qa, "vision_configured",
                           return_value=verdict is not None), \
              patch.object(svg_icons, "review_icon", return_value=verdict):
             return self.render(**kwargs)
@@ -221,19 +219,26 @@ class TestIconTool(unittest.TestCase):
         result = self.run_tool(verdict={"passed": True, "issues": [],
                                         "reads_as": "a clock"},
                                concept="Time to market")
-        self.assertTrue(result["image_url"].startswith("files/"))
+        self.assertIn(result["icon_id"], self.icons)
         self.assertEqual(result["mime_type"], svg_icons.PNG_MIME)
         self.assertEqual(result["review"]["passed"], True)
-        self.assertIn("add_image_from_dial_url", result["message"])
-        self.assertEqual(FakeDialClient.uploaded[0][0], "time-to-market.png")
+        self.assertIn("add_icon_to_slide", result["message"])
 
-    def test_a_failed_review_stores_nothing_and_says_what_to_do(self):
+    def test_the_icon_never_goes_through_dial_storage(self):
+        """A file this server writes lands in its own appdata, which the
+        orchestrator cannot get granted back to itself — the 403 that made
+        the handle necessary."""
+        with patch("dial_client.DialFileClient") as client:
+            self.run_tool(verdict={"passed": True, "issues": []})
+        self.assertFalse(client.called)
+
+    def test_a_failed_review_keeps_nothing_and_says_what_to_do(self):
         result = self.run_tool(verdict={
             "passed": False,
             "issues": [{"severity": "major", "description": "a blob",
                         "suggested_fix": "close the path"}]})
-        self.assertNotIn("image_url", result)
-        self.assertEqual(FakeDialClient.uploaded, [])
+        self.assertNotIn("icon_id", result)
+        self.assertEqual(len(self.icons), 0)
         self.assertIn("render_svg_icon again", result["message"])
         self.assertEqual(len(result["review"]["issues"]), 1)
 
@@ -241,11 +246,11 @@ class TestIconTool(unittest.TestCase):
         result = self.run_tool(verdict={"passed": True, "issues": []},
                                review=False)
         self.assertNotIn("review", result)
-        self.assertIn("image_url", result)
+        self.assertIn("icon_id", result)
 
     def test_without_a_vision_model_the_icon_still_ships_with_a_caveat(self):
         result = self.run_tool(verdict=None)
-        self.assertIn("image_url", result)
+        self.assertIn("icon_id", result)
         self.assertIn("No vision model", result["review_note"])
 
     def test_the_slide_qa_switch_does_not_turn_off_the_icon_review(self):
@@ -255,7 +260,6 @@ class TestIconTool(unittest.TestCase):
                                        "VISION_LLM_MODEL": "gpt-4o",
                                        "VISION_LLM_PROVIDER": "dial",
                                        "DIAL_CORE_URL": "https://dial.test"}), \
-             patch("dial_client.DialFileClient", FakeDialClient), \
              patch.object(svg_icons, "review_icon",
                           return_value={"passed": True, "issues": []}) as review:
             result = self.render(svg=ICON, size=200)
@@ -263,12 +267,11 @@ class TestIconTool(unittest.TestCase):
         self.assertEqual(result["review"]["passed"], True)
 
     def test_an_unreachable_reviewer_is_a_note_not_a_failure(self):
-        with patch("dial_client.DialFileClient", FakeDialClient), \
-             patch.object(visual_qa, "vision_configured", return_value=True), \
+        with patch.object(visual_qa, "vision_configured", return_value=True), \
              patch.object(svg_icons, "review_icon",
                           side_effect=visual_qa.VisualQAError("endpoint down")):
             result = self.render(svg=ICON, size=200)
-        self.assertIn("image_url", result)
+        self.assertIn("icon_id", result)
         self.assertIn("endpoint down", result["review_note"])
 
     def test_a_bad_svg_is_an_error_dict_not_an_exception(self):
@@ -283,16 +286,46 @@ class TestIconTool(unittest.TestCase):
         self.assertIn("error", self.run_tool(background="chartreuse"))
         self.assertIn("error", self.run_tool(slide_background="#GGG"))
 
-    def test_a_failed_upload_is_an_error_not_a_half_answer(self):
-        class Broken(FakeDialClient):
-            def upload(self, *args, **kwargs):
-                raise RuntimeError("no bucket")
+    def place_one(self, **kwargs):
+        icon = self.run_tool(verdict={"passed": True, "issues": []})
+        kwargs.setdefault("presentation_id", self.pid)
+        kwargs.setdefault("slide_index", 0)
+        kwargs.setdefault("icon_id", icon["icon_id"])
+        return self.place(**kwargs)
 
-        with patch("dial_client.DialFileClient", Broken), \
-             patch.object(visual_qa, "vision_configured", return_value=False):
-            result = self.render(svg=ICON, size=200)
-        self.assertIn("error", result)
-        self.assertIn("no bucket", result["error"])
+    def test_placing_edits_the_deck_so_it_is_not_read_only(self):
+        """The wrapper reads this hint to decide whether the deck now needs
+        re-inspection — an icon on a slide certainly does."""
+        self.assertFalse(getattr(self.place_tool.annotations, "readOnlyHint",
+                                 False))
+
+    def test_an_icon_is_placed_square_and_centred_in_its_box(self):
+        result = self.place_one(left=1.0, top=2.0, size=0.8)
+        self.assertEqual(result["shape_index"], 0)
+        self.assertEqual(result["placed"]["width"], 0.8)
+        self.assertEqual(result["placed"]["height"], 0.8)
+        self.assertEqual(result["placed"]["left"], 1.0)
+        self.assertEqual(len(self.store[self.pid].slides[0].shapes), 1)
+
+    def test_one_icon_can_be_placed_repeatedly(self):
+        icon = self.run_tool(verdict={"passed": True, "issues": []})
+        for left in (1.0, 2.0, 3.0):
+            self.assertIn("shape_index",
+                          self.place(presentation_id=self.pid, slide_index=0,
+                                     icon_id=icon["icon_id"], left=left))
+        self.assertEqual(len(self.store[self.pid].slides[0].shapes), 3)
+
+    def test_an_unknown_icon_handle_is_refused_with_the_way_out(self):
+        result = self.place(presentation_id=self.pid, slide_index=0,
+                            icon_id="deadbeef")
+        self.assertIn("render the icon again", result["error"])
+
+    def test_placement_guards(self):
+        self.assertIn("error", self.place_one(presentation_id="nope"))
+        self.assertIn("error", self.place_one(slide_index=7))
+        self.assertIn("error", self.place_one(left=-1))
+        self.assertIn("error", self.place_one(size=0))
+        self.assertIn("error", self.place_one(size=99))
 
     def test_the_guidance_document_is_served(self):
         result = self.guidance()
@@ -304,6 +337,40 @@ class TestIconTool(unittest.TestCase):
             result = self.guidance()
         self.assertIn("error", result)
         self.assertIn("line art", result["error"])
+
+
+class TestIconStore(unittest.TestCase):
+    """Handles are capabilities and memory is bounded, as for decks."""
+
+    def test_a_handle_returns_the_bytes_and_the_metadata(self):
+        store = svg_icons.IconStore()
+        icon_id = store.put(b"png-bytes", {"concept": "gear"})
+        png, meta = store.get(icon_id)
+        self.assertEqual(png, b"png-bytes")
+        self.assertEqual(meta["concept"], "gear")
+        self.assertIn(icon_id, store)
+
+    def test_handles_are_unguessable_and_unique(self):
+        store = svg_icons.IconStore()
+        ids = {store.put(b"x") for _ in range(5)}
+        self.assertEqual(len(ids), 5)
+        self.assertTrue(all(len(i) == 32 for i in ids))
+
+    def test_an_unknown_handle_is_none_not_an_error(self):
+        self.assertIsNone(svg_icons.IconStore().get("nope"))
+
+    def test_the_oldest_icon_is_evicted_at_the_cap(self):
+        store = svg_icons.IconStore(max_items=2)
+        first = store.put(b"a")
+        store.put(b"b")
+        store.put(b"c")
+        self.assertEqual(len(store), 2)
+        self.assertNotIn(first, store)
+
+    def test_icons_expire(self):
+        store = svg_icons.IconStore(ttl_seconds=0)
+        icon_id = store.put(b"a")
+        self.assertIsNone(store.get(icon_id))
 
 
 class TestGuidanceDocument(unittest.TestCase):

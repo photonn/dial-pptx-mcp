@@ -216,7 +216,7 @@ coherent and already the brand. Take accents from them.
   have — and especially where it has to sit on a coloured card, which a stock
   icon with its baked-in white background cannot — draw it: `get_icon_guidance`
   then `render_svg_icon`, which renders your SVG, checks it and hands back a
-  transparent PNG for `add_image_from_dial_url`.
+  handle for `add_icon_to_slide`.
 
 ---
 
