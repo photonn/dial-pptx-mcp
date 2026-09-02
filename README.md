@@ -14,6 +14,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | State | process globals, guessable sequential IDs | per-deck UUID handles (unguessable), thread-safe store with TTL + LRU bounds, per-deck locking |
 | File I/O | local disk paths | DIAL Files API: template in via Quick Apps `file:data::` references, deck out via `export_presentation` returning a DIAL file URL |
 | Images | local path or base64 | `add_image_from_dial_url` fetches orchestrator-generated images from DIAL storage server-side, with aspect-ratio-aware placement |
+| Icons | none | `render_svg_icon`: the agent draws the icon as SVG (`get_icon_guidance` holds the style guide), the server rasterizes it to a transparent PNG, has the vision model check the render for artifacts, and stores it in DIAL |
 | Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations` — python-pptx has no API for any of these |
 | Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
 | Validation | none | `validate_presentation`: package, relationship, geometry, chart, table and placeholder-text checks, folded into export |
@@ -40,6 +41,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `DIAL_UPLOAD_FOLDER` | no | `pptx-mcp` | Folder inside the bucket for exported decks |
 | `DIAL_PUBLIC_URL` | no | — | Extra host(s) DIAL file links may carry besides `DIAL_CORE_URL` (comma-separated URLs or hostnames). Needed when the server reaches Core in-cluster but the orchestrator holds public `https://chat.example.com/api/files/...` links. The bytes are always fetched from `DIAL_CORE_URL` — only the path is taken from the link |
 | `DIAL_IMAGE_MAX_MB` | no | `20` | Largest image `add_image_from_dial_url` will download and embed. An unparsable value falls back to the default |
+| `SVG_ICON_MAX_KB` | no | `64` | Largest SVG source `render_svg_icon` will rasterize. An icon is a handful of paths; the limit is what stops traced artwork arriving as an "icon". An unparsable value falls back to the default |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
@@ -151,6 +153,40 @@ Two consequences worth knowing. **Pass the URL exactly as received, in that para
 **What counts as an image URL.** A DIAL file reference: the `files/{bucket}/{path}` URL an upload returns, or the full https URL of that file on this DIAL installation — the `.../api/files/{bucket}/{path}` link an image deployment hands back is accepted as-is, as is the Core API's `/v1/files/...` form. Arbitrary web URLs are refused: this server is not a web fetcher, and an agent that finds a picture online must store it in DIAL file storage before inserting it. If your file links carry a different hostname than `DIAL_CORE_URL` (public chat host vs. in-cluster service), list it in `DIAL_PUBLIC_URL`.
 
 Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
+
+## Icons (agent-drawn SVG)
+
+Icons are the one visual an image model is bad at and a stock library only half-solves. The library problem is background: a stock icon file carries an opaque white background, so the moment a card is tinted or a panel is brand blue it shows as a pale rectangle — and no library has "regulatory submission" anyway.
+
+So icons follow the same split as images, with one extra step. **The orchestrator draws, the server renders and checks, the orchestrator places.**
+
+| Tool | What it does |
+|---|---|
+| `get_icon_guidance()` | Serves [docs/ICON_GUIDANCE.md](docs/ICON_GUIDANCE.md): when a drawn icon is the right answer, the two variants (line art for a light surface, white-on-filled disc for a coloured one), the rules that keep a set coherent, and eleven worked path examples to adapt |
+| `render_svg_icon(svg, concept?, size?, background?, slide_background?, review?, filename?)` | Validates and rasterizes the SVG to PNG (PyMuPDF), has the vision model review the render, uploads it to DIAL storage and returns the `image_url` for `add_image_from_dial_url` |
+
+**Why the render is reviewed before it is placed.** A hand-written path is valid XML long before it is a recognisable pictogram: an unclosed subpath fills into a blob, a stray coordinate leaves a hairline across the canvas, a mistyped `viewBox` puts the drawing off the edge. The agent cannot see any of that, and by the time visual QA meets the icon on a slide the repair whitelist offers only move, resize and delete — the deck loses the icon rather than getting a correct one. So the icon is reviewed alone, at full size *and* downscaled to the ~1in it will actually occupy, composited onto `slide_background` so contrast is judged against the real surface. **A failed review stores nothing**: there is no `image_url` to place, and the agent is told to fix the SVG and call again. Two cheap failures beat one broken slide.
+
+Two checks run before the model is asked anything, because they name the defect more precisely than a verdict can: a render with no ink at all is refused outright ("the shapes are probably outside the viewBox"), and one that is nearly blank or nearly solid comes back with a `render_note` saying which.
+
+**Input is untrusted.** The SVG is written by a model and parsed in this process, so `render_svg_icon` refuses DOCTYPE/ENTITY declarations (the XXE shape), `<script>`, `<foreignObject>`, embedded `<image>`, event-handler attributes, and any `href`/`url()` that leaves the document — an SVG that fetches is an SSRF primitive just like a URL parameter. Text elements are refused too, for a second reason: glyphs would come from whatever font the rasterizer substitutes, which is exactly the artifact class this feature exists to catch. Line art only — `<path>`, `<circle>`, `<rect>`, `<line>`, `<polyline>`, `<polygon>`.
+
+Rendering is PyMuPDF, already a dependency for the QA rasterizer, so icons work wherever the server runs — no LibreOffice, no new native library. Only the review needs a vision model; without one the icon still ships, with a note saying it was not checked.
+
+**Telling the agent to use it.** Drawing is the orchestrator's job, so it belongs in the Quick App's system prompt:
+
+```text
+When a slide needs an icon — a row of cards, the steps of a process, a section
+marker — do not ask the image model for one. Call get_icon_guidance once, write
+the icon yourself as SVG following it, and pass it to render_svg_icon with
+concept set to what it depicts and slide_background set to the colour it will
+sit on. If the response says the review did not pass, fix the SVG as the issues
+say and call it again; do not place an icon that has no image_url. Then place
+the image_url with add_image_from_dial_url in a square box, fit="contain",
+about 0.7in in a card and 1.0-1.2in beside a section title. Draw all of a
+deck's icons in one style, and reuse an icon's image_url wherever it repeats.
+If the user's template already has icons for what you need, use those instead.
+```
 
 ## Building a deck
 

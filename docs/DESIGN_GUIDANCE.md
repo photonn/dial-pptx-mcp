@@ -211,6 +211,12 @@ coherent and already the brand. Take accents from them.
   `validate_presentation` reports it.
 - **Give an image real size.** A 1.5in photo in a corner is decoration nobody
   looks at. Half the slide, or a full bleed, or don't bother.
+- **Icons are the exception to that, and they have their own route.** In
+  template mode the template's own icons win; where you need one it doesn't
+  have — and especially where it has to sit on a coloured card, which a stock
+  icon with its baked-in white background cannot — draw it: `get_icon_guidance`
+  then `render_svg_icon`, which renders your SVG, checks it and hands back a
+  transparent PNG for `add_image_from_dial_url`.
 
 ---
 

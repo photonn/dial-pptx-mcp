@@ -43,7 +43,8 @@ from tools import (
     register_slide_tools,
     register_validation_tools,
     register_guidance_tools,
-    register_preview_tools
+    register_preview_tools,
+    register_icon_tools
 )
 
 # Initialize the FastMCP server
@@ -354,6 +355,10 @@ register_guidance_tools(
 register_preview_tools(
     app,
     presentations
+)
+
+register_icon_tools(
+    app
 )
 
 
