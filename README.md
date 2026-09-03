@@ -45,6 +45,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `SVG_ICON_MAX_KB` | no | `64` | Largest SVG source `render_svg_icon` will rasterize. An icon is a handful of paths; the limit is what stops traced artwork arriving as an "icon". An unparsable value falls back to the default |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
+| `PPT_MCP_MAX_CONCURRENT_TOOL_CALLS` | no | `2x CPU count` | Max tool calls running at once, process-wide (see [Multi-tenancy and scaling notes](#multi-tenancy-and-scaling-notes)). Bounds a burst of parallel tool calls (many tenants, or several `render_svg_icon` calls in one agent turn) so the pod's CPU can't be flooded |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
 | `VISION_LLM_MODEL` | for visual QA | — | Vision model: the model name (direct endpoint) or the DIAL deployment name (DIAL provider); must accept image input |
 | `VISION_LLM_ENDPOINT` | direct provider | — | OpenAI Responses-API endpoint, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. When unset, the model is called through DIAL Core instead: `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` with DIAL credentials (caller headers first, `DIAL_API_KEY` fallback) |
@@ -375,6 +376,7 @@ Per-subsystem tuning is available in code: loggers are nested under `dial_pptx` 
 - Presentation handles are server-generated UUIDs and act as unguessable capabilities; clients cannot enumerate or guess other conversations' decks.
 - Presentation state lives in process memory (bounded by TTL + LRU). Run a single replica, or use session affinity if you scale out — a deck created on one replica is not visible on another.
 - Calls targeting the same presentation are serialized (python-pptx is not thread-safe); different presentations are handled concurrently.
+- Every tool call runs on a worker thread rather than the server's single event loop, so an orchestrator's parallel tool calls (e.g. several `render_svg_icon` calls in one agent turn) genuinely overlap instead of queuing behind each other's blocking I/O. `PPT_MCP_MAX_CONCURRENT_TOOL_CALLS` bounds how many run at once, process-wide, so a burst of concurrent calls cannot flood the pod's CPU.
 
 ## Development
 
