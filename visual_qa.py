@@ -421,21 +421,30 @@ class VisionLLM:
             return {}
 
 
-def enforcement_enabled() -> bool:
-    """Visual QA is available when the vision LLM is configured — either
-    directly (VISION_LLM_ENDPOINT + VISION_LLM_API_KEY) or as a DIAL Core
-    deployment (DIAL_CORE_URL) — unless disabled with VISUAL_QA_ENFORCE=false.
+def vision_configured() -> bool:
+    """Whether a vision model can be reached at all — either directly
+    (VISION_LLM_ENDPOINT + VISION_LLM_API_KEY) or as a DIAL Core deployment
+    (DIAL_CORE_URL).
 
-    Gates registration of the inspect/repair tools; also required for the
-    optional export gate (see export_gate_enabled)."""
+    Deliberately separate from enforcement_enabled(): VISUAL_QA_ENFORCE turns
+    off *slide* inspection and repair, and a feature that merely uses the model
+    for its own check — the icon review — should follow whether the model
+    exists, not that switch."""
     if not os.environ.get("VISION_LLM_MODEL"):
         return False
     if _resolve_provider() == "direct":
-        configured = bool(os.environ.get("VISION_LLM_ENDPOINT")
-                          and os.environ.get("VISION_LLM_API_KEY"))
-    else:
-        configured = bool(os.environ.get("DIAL_CORE_URL"))
-    return configured and os.environ.get(
+        return bool(os.environ.get("VISION_LLM_ENDPOINT")
+                    and os.environ.get("VISION_LLM_API_KEY"))
+    return bool(os.environ.get("DIAL_CORE_URL"))
+
+
+def enforcement_enabled() -> bool:
+    """Visual QA is available when the vision LLM is configured, unless
+    disabled with VISUAL_QA_ENFORCE=false.
+
+    Gates registration of the inspect/repair tools; also required for the
+    optional export gate (see export_gate_enabled)."""
+    return vision_configured() and os.environ.get(
         "VISUAL_QA_ENFORCE", "true").lower() != "false"
 
 
