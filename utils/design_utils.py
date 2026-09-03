@@ -457,7 +457,8 @@ def enhance_image_with_pillow(image_path: str, brightness: float = 1.0, contrast
     
     # Save enhanced image
     if output_path is None:
-        output_path = tempfile.mktemp(suffix='.png')
+        fd, output_path = tempfile.mkstemp(suffix='.png')
+        os.close(fd)
     
     img.save(output_path)
     return output_path
@@ -639,7 +640,8 @@ def optimize_font_for_presentation(font_path: str, output_path: str = None,
         
         # Generate output path if not provided
         if output_path is None:
-            output_path = tempfile.mktemp(suffix='.ttf')
+            fd, output_path = tempfile.mkstemp(suffix='.ttf')
+            os.close(fd)
         
         font.save(output_path)
         return output_path
