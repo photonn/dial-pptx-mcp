@@ -65,10 +65,6 @@ class TestPresentationStore(unittest.TestCase):
         self.assertEqual([e[1] for e in order], ["in", "out", "in", "out"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class _FakeTool:
     """Minimal stand-in for the SDK's Tool object (name, fn, annotations)."""
 
@@ -166,11 +162,22 @@ class TestToolConcurrency(unittest.TestCase):
         return tools["demo_tool"].fn
 
     def test_independent_calls_overlap_instead_of_serializing(self):
-        # Two blocking (time.sleep) calls with no shared presentation_id
-        # must run concurrently on separate worker threads: total wall time
-        # close to one sleep, not the sum of both.
+        # Two blocking calls with no shared presentation_id must run
+        # concurrently on separate worker threads: track actual in-flight
+        # overlap via a shared counter rather than wall-clock timing.
+        in_flight = 0
+        max_in_flight = 0
+        lock = threading.Lock()
+        barrier = threading.Barrier(2, timeout=5)
+
         def slow(**kw):
-            time.sleep(0.15)
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            barrier.wait()  # blocks until both calls are concurrently in-flight
+            with lock:
+                in_flight -= 1
             return {"ok": True}
 
         fn = self._register(slow, monkeypatch_env="8")
@@ -178,15 +185,23 @@ class TestToolConcurrency(unittest.TestCase):
         async def run_both():
             await asyncio.gather(fn(presentation_id="a"), fn(presentation_id="b"))
 
-        started = time.monotonic()
         asyncio.run(run_both())
-        elapsed = time.monotonic() - started
-        self.assertLess(elapsed, 0.28)  # well under 2x0.15 if serialized
+        self.assertEqual(max_in_flight, 2)
 
     def test_concurrency_capped_by_limiter(self):
         # With the limiter set to 1, two blocking calls must NOT overlap.
+        in_flight = 0
+        max_in_flight = 0
+        lock = threading.Lock()
+
         def slow(**kw):
-            time.sleep(0.1)
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
             return {"ok": True}
 
         fn = self._register(slow, monkeypatch_env="1")
@@ -194,10 +209,8 @@ class TestToolConcurrency(unittest.TestCase):
         async def run_both():
             await asyncio.gather(fn(presentation_id="a"), fn(presentation_id="b"))
 
-        started = time.monotonic()
         asyncio.run(run_both())
-        elapsed = time.monotonic() - started
-        self.assertGreaterEqual(elapsed, 0.2)  # serialized behind the cap
+        self.assertEqual(max_in_flight, 1)  # serialized behind the cap
 
     def test_same_presentation_calls_still_serialize_despite_threading(self):
         order = []
@@ -225,3 +238,7 @@ class TestToolConcurrency(unittest.TestCase):
         fn = self._register(lambda **kw: {"ok": True}, monkeypatch_env="not-a-number")
         result = asyncio.run(fn(presentation_id="a"))
         self.assertEqual(result, {"ok": True})
+
+
+if __name__ == "__main__":
+    unittest.main()
