@@ -1,6 +1,8 @@
 """Unit tests for the concurrency-safe PresentationStore (workstream 5.3)."""
+import asyncio
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -63,10 +65,6 @@ class TestPresentationStore(unittest.TestCase):
         self.assertEqual([e[1] for e in order], ["in", "out", "in", "out"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class _FakeTool:
     """Minimal stand-in for the SDK's Tool object (name, fn, annotations)."""
 
@@ -89,9 +87,12 @@ class TestToolCallLogging(unittest.TestCase):
         store[pid] = object()
         tools = {"demo_tool": _FakeTool(fn, read_only)}
         serialize_per_presentation(_FakeApp(tools), store)
+        # Wrapped tools are coroutine functions now — see is_async below.
+        self.assertTrue(tools["demo_tool"].is_async)
         with self.assertLogs("dial_pptx.tool.demo_tool", level="DEBUG") as caught:
             try:
-                result = tools["demo_tool"].fn(presentation_id=pid, **kwargs)
+                result = asyncio.run(
+                    tools["demo_tool"].fn(presentation_id=pid, **kwargs))
             except RuntimeError:
                 result = None
         return caught.records, result, store, pid
@@ -134,3 +135,110 @@ class TestToolCallLogging(unittest.TestCase):
         for record in records:
             self.assertNotIn(pid, record.getMessage())
             self.assertIn(pid[:8], record.getMessage())
+
+
+class TestToolConcurrency(unittest.TestCase):
+    """Wrapped tools run on worker threads, bounded by
+    PPT_MCP_MAX_CONCURRENT_TOOL_CALLS, instead of blocking the event loop."""
+
+    def _register(self, fn, monkeypatch_env=None, presentation_ids=()):
+        store = PresentationStore(ttl_seconds=60, max_items=10)
+        for pid in presentation_ids:
+            store[pid] = object()
+        tools = {"demo_tool": _FakeTool(fn, read_only=True)}
+        if monkeypatch_env is not None:
+            import os
+            old = os.environ.get("PPT_MCP_MAX_CONCURRENT_TOOL_CALLS")
+            os.environ["PPT_MCP_MAX_CONCURRENT_TOOL_CALLS"] = monkeypatch_env
+            try:
+                serialize_per_presentation(_FakeApp(tools), store)
+            finally:
+                if old is None:
+                    del os.environ["PPT_MCP_MAX_CONCURRENT_TOOL_CALLS"]
+                else:
+                    os.environ["PPT_MCP_MAX_CONCURRENT_TOOL_CALLS"] = old
+        else:
+            serialize_per_presentation(_FakeApp(tools), store)
+        return tools["demo_tool"].fn
+
+    def test_independent_calls_overlap_instead_of_serializing(self):
+        # Two blocking calls with no shared presentation_id must run
+        # concurrently on separate worker threads: track actual in-flight
+        # overlap via a shared counter rather than wall-clock timing.
+        in_flight = 0
+        max_in_flight = 0
+        lock = threading.Lock()
+        barrier = threading.Barrier(2, timeout=5)
+
+        def slow(**kw):
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            barrier.wait()  # blocks until both calls are concurrently in-flight
+            with lock:
+                in_flight -= 1
+            return {"ok": True}
+
+        fn = self._register(slow, monkeypatch_env="8")
+
+        async def run_both():
+            await asyncio.gather(fn(presentation_id="a"), fn(presentation_id="b"))
+
+        asyncio.run(run_both())
+        self.assertEqual(max_in_flight, 2)
+
+    def test_concurrency_capped_by_limiter(self):
+        # With the limiter set to 1, two blocking calls must NOT overlap.
+        in_flight = 0
+        max_in_flight = 0
+        lock = threading.Lock()
+
+        def slow(**kw):
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            return {"ok": True}
+
+        fn = self._register(slow, monkeypatch_env="1")
+
+        async def run_both():
+            await asyncio.gather(fn(presentation_id="a"), fn(presentation_id="b"))
+
+        asyncio.run(run_both())
+        self.assertEqual(max_in_flight, 1)  # serialized behind the cap
+
+    def test_same_presentation_calls_still_serialize_despite_threading(self):
+        order = []
+
+        def worker(**kw):
+            order.append(("start", kw["tag"]))
+            time.sleep(0.05)
+            order.append(("end", kw["tag"]))
+            return {"ok": True}
+
+        fn = self._register(worker, monkeypatch_env="8",
+                            presentation_ids=["same"])
+
+        async def run_both():
+            await asyncio.gather(
+                fn(presentation_id="same", tag="a"),
+                fn(presentation_id="same", tag="b"),
+            )
+
+        asyncio.run(run_both())
+        # Critical sections for the same deck must not interleave.
+        self.assertEqual([e[0] for e in order], ["start", "end", "start", "end"])
+
+    def test_invalid_env_value_falls_back_to_default(self):
+        fn = self._register(lambda **kw: {"ok": True}, monkeypatch_env="not-a-number")
+        result = asyncio.run(fn(presentation_id="a"))
+        self.assertEqual(result, {"ok": True})
+
+
+if __name__ == "__main__":
+    unittest.main()

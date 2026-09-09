@@ -136,10 +136,29 @@ server-generated UUIDs that act as unguessable capabilities, with TTL + LRU evic
 reintroduce them.
 
 `serialize_per_presentation(app, presentations)` runs in `main()` and monkey-patches every registered tool's `fn` to
-(a) hold that deck's lock for the call (python-pptx is not thread-safe) and (b) mark the deck dirty on any successful
-non-read-only, non-export call. It reaches into `app._tool_manager._tools`, which is why `mcp[cli]` is pinned `<2.0`; it
-degrades to a warning if those internals change. **Consequence: a new tool must declare `readOnlyHint=True` in its
-`ToolAnnotations` if it doesn't modify the deck**, or every call to it triggers a fresh visual-QA pass.
+(a) run on a worker thread, bounded by a process-wide `anyio.CapacityLimiter` sized from
+`PPT_MCP_MAX_CONCURRENT_TOOL_CALLS`, (b) hold that deck's lock for the call (python-pptx is not thread-safe — acquired
+inside the worker thread, so it only blocks other calls for the same deck, never the event loop), and (c) mark the deck
+dirty on any successful non-read-only, non-export call. It reaches into `app._tool_manager._tools`, which is why
+`mcp[cli]` is pinned `<2.0`; it degrades to a warning (and loses both the locking and the thread dispatch) if those
+internals change. **Consequence: a new tool must declare `readOnlyHint=True` in its `ToolAnnotations` if it doesn't
+modify the deck**, or every call to it triggers a fresh visual-QA pass.
+
+**Why every tool call needs dispatching to a thread at all.** Every tool in `tools/` is a plain `def`, and FastMCP's
+`call_fn_with_arg_validation` calls a sync tool's `fn` directly — `fn(**kwargs)`, no `anyio.to_thread.run_sync` — so it
+runs inline on the single asyncio event loop the SDK dispatches all tool calls on. Since DIAL Quick Apps (and any other
+orchestrator that fires an LLM's parallel tool calls concurrently) issues genuinely concurrent `call_tool` requests
+over one MCP session, and this server's own tool bodies do blocking work throughout (python-pptx edits, PyMuPDF
+rasterization, a LibreOffice subprocess, synchronous DIAL/vision-LLM `httpx` calls), leaving tools sync would mean an
+orchestrator's "parallel" calls serialize on the server regardless — one call's blocking I/O stalls every other call
+the process is handling, including ones for a completely unrelated deck. `serialize_per_presentation` is the single
+choke point all ~50+ tools pass through, so it is where this is fixed once rather than per tool: it wraps `fn` in an
+`async def` that awaits `anyio.to_thread.run_sync(...)`, and — because FastMCP decides whether to `await` a tool from
+an `is_async` flag captured at *registration* time from the original function, not from whatever `fn` holds when
+called — it also force-sets `tool.is_async = True` after replacing `fn`, or the SDK would call the new coroutine
+function without awaiting it. Don't convert individual tool modules to `async def`; this wrapper is the intended
+concurrency boundary, and it's what makes `PPT_MCP_MAX_CONCURRENT_TOOL_CALLS` the single knob that bounds CPU exposure
+on a pod regardless of which tools are in flight.
 
 **Visual QA (`visual_qa.py`, `visual_fix.py`, `tools/visual_tools.py`).** Agent-driven, not an export gate: when a vision
 LLM is configured, `register_visual_tools` exposes `visual_inspect_slides` (read-only review) and `visual_repair_slides`

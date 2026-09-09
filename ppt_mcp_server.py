@@ -467,8 +467,10 @@ def _visual_qa_status():
 
 
 def main(transport: str = "stdio", port: int = 8000, host: str = "127.0.0.1"):
-    # Serialize tool calls that target the same presentation (python-pptx is
-    # not thread-safe); calls on different presentations run concurrently.
+    # Dispatch every tool call to a worker thread (bounded by
+    # PPT_MCP_MAX_CONCURRENT_TOOL_CALLS) so blocking calls overlap instead of
+    # serializing on the event loop, while still serializing calls that
+    # target the same presentation (python-pptx is not thread-safe).
     serialize_per_presentation(app, presentations)
     # Keep uvicorn's own verbosity in step with LOG_LEVEL.
     app.settings.log_level = LOG_LEVEL

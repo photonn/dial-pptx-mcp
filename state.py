@@ -19,6 +19,12 @@ Design (workstream 5.3):
 - Each presentation has an ``RLock``; ``lock_for(pres_id)`` lets the server
   serialize tool calls that target the same deck (python-pptx objects are
   not thread-safe). Calls on different decks run concurrently.
+- ``serialize_per_presentation`` also dispatches every tool call to a worker
+  thread (see its docstring) so that one blocking call — a vision-LLM review,
+  a DIAL upload, a LibreOffice conversion — cannot stall every other call the
+  process is handling. Concurrency is bounded by
+  ``PPT_MCP_MAX_CONCURRENT_TOOL_CALLS`` to keep a single pod from being
+  flooded.
 """
 import logging
 import os
@@ -26,6 +32,9 @@ import threading
 import time
 import uuid
 from collections.abc import MutableMapping
+
+import anyio
+import anyio.to_thread
 
 from logging_utils import get_logger, flatten
 
@@ -167,12 +176,50 @@ def _arg_summary(kwargs, limit=200):
     return " ".join(parts)[:limit] or "-"
 
 
+def _max_concurrent_tool_calls():
+    """How many tool calls may run at once, process-wide. Every tool in this
+    codebase is a plain ``def`` (see serialize_per_presentation) doing
+    blocking work — python-pptx edits, PyMuPDF rasterization, a LibreOffice
+    subprocess, or a synchronous httpx call to DIAL/a vision LLM. Dispatching
+    them to worker threads lets independent calls overlap instead of
+    serializing on the single asyncio event loop, but an unbounded thread
+    pool would let a burst of requests (many tenants, or one agent firing a
+    dozen parallel render_svg_icon calls) pile up enough CPU-bound work to
+    starve the pod. The default assumes most calls are network-bound (vision
+    review, DIAL I/O) rather than CPU-bound, so it leaves headroom above the
+    CPU count; override with PPT_MCP_MAX_CONCURRENT_TOOL_CALLS if a
+    deployment's mix runs heavier on rendering/conversion."""
+    raw = os.environ.get("PPT_MCP_MAX_CONCURRENT_TOOL_CALLS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning("invalid_max_concurrent_tool_calls value=%r "
+                           "falling_back_to_default", raw)
+    return max(4, (os.cpu_count() or 4) * 2)
+
+
 def serialize_per_presentation(app, store):
-    """Wrap every registered tool so that (a) calls holding the same
-    presentation_id are serialized on that deck's lock (python-pptx is not
-    thread-safe) and (b) successful editing calls mark the deck as needing
-    visual inspection before its next export (see export gate in
-    tools/presentation_tools.py).
+    """Wrap every registered tool so that (a) it runs on a worker thread,
+    bounded by a process-wide capacity limiter, instead of blocking the
+    single asyncio event loop FastMCP dispatches tools on — every tool here
+    is a synchronous function doing blocking I/O or CPU work, and the SDK
+    calls a sync tool's fn directly rather than off-loading it (see
+    mcp.server.fastmcp.utilities.func_metadata.call_fn_with_arg_validation),
+    so without this a single slow call (a vision-LLM review, a DIAL upload, a
+    LibreOffice conversion) stalls every other call the process is handling,
+    including ones for an unrelated deck; (b) calls holding the same
+    presentation_id are still serialized on that deck's lock (python-pptx is
+    not thread-safe — the lock is acquired inside the worker thread, so it
+    only blocks other calls for the same deck, never the event loop); and
+    (c) successful editing calls mark the deck as needing visual inspection
+    before its next export (see export gate in tools/presentation_tools.py).
+
+    Marks each wrapped tool ``is_async = True`` after replacing its ``fn``:
+    FastMCP decides whether to await a tool from a flag captured at
+    registration time from the *original* function, not from whatever ``fn``
+    holds when it is actually called, so the flag has to be corrected by hand
+    once ``fn`` becomes a coroutine function.
 
     Uses the FastMCP 1.x tool registry (mcp[cli] is pinned <2.0 in
     requirements.txt); degrades to a no-op with a warning if the SDK's
@@ -183,21 +230,30 @@ def serialize_per_presentation(app, store):
     except AttributeError:
         logger.warning(
             "tool_locking_unavailable reason=unexpected_fastmcp_internals "
-            "impact=same_deck_calls_not_serialized")
+            "impact=same_deck_calls_not_serialized_and_not_parallelized")
         return
+
+    max_concurrent = _max_concurrent_tool_calls()
+    limiter = anyio.CapacityLimiter(max_concurrent)
+    logger.info("tool_concurrency_configured max_concurrent=%d", max_concurrent)
 
     def wrap(name, fn, read_only):
         marks_dirty = not read_only and name not in _NON_EDITING_TOOLS
 
-        def wrapper(*args, **kwargs):
+        async def wrapper(*args, **kwargs):
             pres_id = kwargs.get("presentation_id")
             call_logger = get_logger(f"tool.{name}")
             call_logger.debug("tool_start tool=%s presentation_id=%s args=%s",
                               name, short_id(pres_id), _arg_summary(kwargs))
             started = time.monotonic()
-            try:
+
+            def run_locked():
                 with store.lock_for(pres_id):
-                    result = fn(*args, **kwargs)
+                    return fn(*args, **kwargs)
+
+            try:
+                result = await anyio.to_thread.run_sync(run_locked,
+                                                         limiter=limiter)
             except Exception as e:
                 call_logger.error(
                     "tool_raised tool=%s presentation_id=%s duration_ms=%d "
@@ -224,3 +280,4 @@ def serialize_per_presentation(app, store):
         annotations = getattr(tool, "annotations", None)
         read_only = bool(annotations and getattr(annotations, "readOnlyHint", False))
         tool.fn = wrap(name, tool.fn, read_only)
+        tool.is_async = True
