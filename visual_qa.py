@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -54,6 +55,33 @@ def _soffice_binary():
     return path
 
 
+_slots = None
+_slots_guard = threading.Lock()
+
+
+def _conversion_slots():
+    """Semaphore bounding concurrent LibreOffice processes.
+
+    Read lazily rather than at import so the .env file loaded in main() is
+    already in effect.
+    """
+    global _slots
+    with _slots_guard:
+        if _slots is None:
+            raw = os.environ.get("PPT_MCP_MAX_CONCURRENT_CONVERSIONS",
+                                 "").strip()
+            limit = 2
+            if raw:
+                try:
+                    limit = max(1, int(raw))
+                except ValueError:
+                    logger.warning("invalid_max_concurrent_conversions "
+                                   "value=%r falling_back_to_default", raw)
+            logger.debug("conversion_limit slots=%d", limit)
+            _slots = threading.Semaphore(limit)
+        return _slots
+
+
 def convert_with_soffice(data: bytes, source_suffix: str, target: str,
                          timeout: float = 180.0) -> bytes:
     """Run one headless LibreOffice conversion and return the output bytes.
@@ -69,13 +97,31 @@ def convert_with_soffice(data: bytes, source_suffix: str, target: str,
         src = tmp / f"deck{source_suffix}"
         src.write_bytes(data)
         profile = tmp / "lo-profile"
+        home = tmp / "home"
+        (home / ".cache").mkdir(parents=True, exist_ok=True)
+        (home / ".config").mkdir(parents=True, exist_ok=True)
         cmd = [
             _soffice_binary(), "--headless", "--norestore",
             f"-env:UserInstallation=file://{profile}",
             "--convert-to", target, "--outdir", str(tmp), str(src),
         ]
+        # dconf and fontconfig key their caches off $HOME, not off the
+        # UserInstallation profile, so a deployment whose $HOME is unset,
+        # read-only or owned by another uid makes soffice fail before it
+        # loads the document. Pointing $HOME at the per-conversion temp dir
+        # keeps that working without the deployment having to supply one.
+        env = {**os.environ, "HOME": str(home),
+               "XDG_CACHE_HOME": str(home / ".cache"),
+               "XDG_CONFIG_HOME": str(home / ".config")}
         started = time.monotonic()
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        # One conversion peaks around half a gigabyte, so an unbounded burst
+        # of them is what exhausts a pod's memory limit rather than its CPU
+        # (which PPT_MCP_MAX_CONCURRENT_TOOL_CALLS already bounds). Queue
+        # here instead: waiting is not counted against `timeout`, which
+        # measures the conversion itself.
+        with _conversion_slots():
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                                  env=env)
         # --convert-to may take a filter suffix ("pdf:impress_pdf_Export");
         # the file it writes is named after the bare extension.
         out = tmp / f"deck.{target.split(':', 1)[0]}"
