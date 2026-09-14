@@ -1,6 +1,6 @@
 # Pinned <2.0: 2.x drops mcp.server.fastmcp, and state.serialize_per_presentation
 # patches the 1.x _tool_manager._tools registry. See CLAUDE.md before widening.
-mcp[cli]>=1.8.0,<2.0.0
+mcp[cli]>=1.8.0,<3.0.0
 python-pptx
 Pillow
 fonttools
