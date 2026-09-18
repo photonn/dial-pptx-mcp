@@ -81,9 +81,13 @@ def register_visual_tools(app: FastMCP, presentations):
         brand fidelity (whole-deck review only).
 
         Returns {"passed": bool, "issues": [{"slide", "severity",
-        "description", "suggested_fix"}]}. Slide numbers in issues are
-        absolute deck positions. This tool only reports — use
-        visual_repair_slides, or your own editing tools, to fix what it finds.
+        "description", "suggested_fix"}], "observations": [...]}. "issues"
+        are objective defects and are the only thing "passed" depends on;
+        "observations" are the reviewer's judgements about composition
+        (sizing, spacing, alignment, brand fidelity), reported for you to
+        weigh and never a reason to fail. Slide numbers are absolute deck
+        positions. This tool only reports — pass its "issues" straight to
+        visual_repair_slides, or fix them with your own editing tools.
         """
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
@@ -124,6 +128,7 @@ def register_visual_tools(app: FastMCP, presentations):
         slides: Optional[List[int]] = None,
         focus: Optional[str] = None,
         max_iterations: Optional[int] = None,
+        issues: Optional[List[Dict]] = None,
     ) -> Dict:
         """Inspect the selected slides and fix what the review finds, then
         re-inspect — repeating until they pass or the iteration budget runs
@@ -133,24 +138,36 @@ def register_visual_tools(app: FastMCP, presentations):
 
         slides: 1-based slide numbers to repair; omit for the whole deck.
         focus: extra instruction for the reviewer.
-        max_iterations: inspect/repair rounds for this call (default
-        VISUAL_QA_MAX_ITERATIONS, normally 10). Lower it for a quick pass on
-        a single slide.
+        issues: the "issues" list from a visual_inspect_slides call you just
+        made on these same slides. Pass it to skip the redundant first review
+        — it is the cheapest thing you can do for latency. Omit it if the
+        deck has changed since that inspection.
+        max_iterations: inspect/repair rounds for this call (default 2 for a
+        slide selection, VISUAL_QA_MAX_ITERATIONS — normally 10 — for the
+        whole deck).
 
-        Returns {"passed", "iterations", "repair_rounds", "issues"} — with
-        "issues" listing what could not be resolved. A false "passed" is a
-        report, not a request to retry the same call: either edit the slide
-        content yourself and inspect again, or tell the user what remains.
+        Returns {"passed", "iterations", "repair_rounds", "issues",
+        "observations"} — "issues" listing what could not be resolved,
+        "observations" the reviewer's judgements, which never fail a deck. A
+        false "passed" is a report, not a request to retry the same call:
+        each round reports "issues_remaining", and when it says repairs are
+        landing without reducing the findings, rebuild the slide content with
+        the editing tools instead of calling this again.
         """
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
             return error
 
-        logger.info("visual_repair_start presentation_id=%s scope=%s",
-                    short_id(presentation_id), _scope(numbers))
+        # A caller-supplied issue list stands in for the loop's own first
+        # review; visual_qa validates and scope-filters it before use.
+        seed = {"passed": False, "issues": issues} if issues else None
+        logger.info("visual_repair_start presentation_id=%s scope=%s seeded=%s",
+                    short_id(presentation_id), _scope(numbers),
+                    str(seed is not None).lower())
         try:
             outcome = visual_qa.inspect_and_repair(pres, numbers, focus,
-                                                   max_iterations)
+                                                   max_iterations,
+                                                   initial_verdict=seed)
         except visual_qa.VisualQAError as e:
             logger.error("visual_repair_failed presentation_id=%s scope=%s "
                          "reason=qa_error error=%s", short_id(presentation_id),

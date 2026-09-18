@@ -15,7 +15,12 @@ The LLM endpoint speaks the OpenAI Responses API with image input
   https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview
 - VISION_LLM_API_KEY    sent as both api-key (Azure) and Authorization: Bearer
 - VISION_LLM_MODEL      model / Azure deployment name (must accept images)
+- VISION_LLM_MODEL_REVIEW / _PLAN  per-role override of the three variables
+  above (also _ENDPOINT_/_API_KEY_): detection and repair planning are
+  different jobs, so they can run on different models. Unset = one model for
+  both, which is what every existing deployment has.
 - VISION_LLM_MAX_SLIDES cap on slides sent per inspection (default 15)
+- VISUAL_QA_RENDER_DPI  resolution of the review render (default 150)
 - SOFFICE_PATH          LibreOffice binary if not "soffice" on PATH
 """
 import base64
@@ -82,6 +87,31 @@ def _conversion_slots():
         return _slots
 
 
+def _seed_dir(env_name: str, destination: Path) -> bool:
+    """Pre-fill a per-conversion directory from a template built at image
+    build time (see the Dockerfile), when the deployment ships one.
+
+    LibreOffice otherwise builds a user profile — and, under a fresh $HOME, a
+    fontconfig cache — from nothing on every single conversion, which on a
+    one-slide deck costs more than rendering the slide. The per-conversion
+    isolation is not negotiable (it is what stops concurrent conversions
+    fighting over the profile lock), so this seeds the private copy instead of
+    sharing one. No template, or an unreadable one: soffice creates its own,
+    exactly as before.
+    """
+    template = os.environ.get(env_name, "").strip()
+    if not template or not os.path.isdir(template):
+        return False
+    try:
+        shutil.copytree(template, destination, dirs_exist_ok=True,
+                        symlinks=True)
+        return True
+    except OSError as e:
+        logger.warning("soffice_seed_failed var=%s path=%s error=%s",
+                       env_name, template, e)
+        return False
+
+
 def convert_with_soffice(data: bytes, source_suffix: str, target: str,
                          timeout: float = 180.0) -> bytes:
     """Run one headless LibreOffice conversion and return the output bytes.
@@ -100,6 +130,8 @@ def convert_with_soffice(data: bytes, source_suffix: str, target: str,
         home = tmp / "home"
         (home / ".cache").mkdir(parents=True, exist_ok=True)
         (home / ".config").mkdir(parents=True, exist_ok=True)
+        seeded = (_seed_dir("PPT_MCP_SOFFICE_PROFILE_TEMPLATE", profile),
+                  _seed_dir("PPT_MCP_SOFFICE_CACHE_TEMPLATE", home / ".cache"))
         cmd = [
             _soffice_binary(), "--headless", "--norestore",
             f"-env:UserInstallation=file://{profile}",
@@ -136,7 +168,8 @@ def convert_with_soffice(data: bytes, source_suffix: str, target: str,
             )
         result = out.read_bytes()
         logger.debug("convert_ok target=%s in_bytes=%d out_bytes=%d "
-                     "duration_ms=%d", target, len(data), len(result),
+                     "seeded_profile=%s seeded_cache=%s duration_ms=%d",
+                     target, len(data), len(result), seeded[0], seeded[1],
                      int((time.monotonic() - started) * 1000))
         return result
 
@@ -226,46 +259,48 @@ def normalize_slides(pres, slides):
 REVIEW_PROMPT = """You are a meticulous presentation QA reviewer. You are shown \
 rendered slide images of a PowerPoint deck generated from a corporate template{ref_note}.
 
-Check every slide for:
-1. Template/brand fidelity: consistent colors, fonts, logo placement, and layout \
-usage matching the deck's own master style{ref_clause}.
-2. Text placement and overlap, ANYWHERE text appears — not just in text boxes. \
-Judge the rendered pixels, not what the text probably says:
-   - Text overflowing, clipped, or spilling outside its container or the slide edge.
-   - Text overlapping other text, or sitting on top of shapes, images or lines in \
-a way that makes either hard to read.
-   - Charts and graphs: axis tick labels colliding with each other or truncated \
-("..." or cut-off words), data labels overlapping their bars/slices/points or each \
-other, a legend covering the plot area or running off the chart, an axis title \
-squeezed or rotated into illegibility, series labels detached from what they label.
-   - Tables: cell text wrapping into an unreadable stack, clipped by the cell or \
-row height, columns too narrow for their content, headers not aligned with their \
-columns, a table extending past the slide.
-   - Diagrams, SmartArt and grouped shapes: labels wider than the node or box that \
-holds them, text escaping a connector or arrow, node labels overlapping neighbouring \
-nodes or connectors.
-   - Text that is too small to read at presentation size, or too low-contrast \
-against what is behind it.
-   - Text sized badly for the space it occupies: a heading or body block set so \
-small that its box is mostly empty, or comparable elements on one slide set at \
-visibly different sizes for no reason. Text should fill its container \
-comfortably without crowding it or its neighbours — report both the starved and \
-the overstuffed cases, but do not ask for larger text where growing it would \
-eat the slide's white space.
-3. Other visible errors: elements off the slide edge, placeholder text left \
-unfilled (e.g. "Click to add title"), broken or empty charts/tables/images, \
-inconsistent alignment or spacing between comparable elements.
+Report what you find in two separate lists, because they are answered \
+differently: a defect is repaired automatically, a judgement is handed to the \
+author. Judge the rendered pixels, not what the text probably says.
 
-Report each problem separately, naming the element it affects (e.g. "chart on the \
-right: x-axis labels overlap"), and say in "suggested_fix" what change would resolve \
-it (resize, reposition, shorten the text, smaller font, wider column, hide the \
-legend).
+"issues" — objective defects, visible in the pixels, that a reader would see as \
+broken. These and only these decide "passed". Look for them ANYWHERE text \
+appears, not just in text boxes:
+   - Text overflowing, clipped, or spilling outside its container or the slide edge.
+   - Text overlapping other text, or sitting on top of a shape, image or line in \
+a way that makes either unreadable.
+   - Elements partly or wholly off the slide.
+   - Placeholder text left unfilled (e.g. "Click to add title").
+   - Charts, tables or images that are broken or empty.
+   - Charts: axis tick labels colliding with each other or truncated ("..." or \
+cut-off words), data labels overlapping their bars/slices/points or each other, \
+a legend covering the plot area or running off the chart, an axis title squeezed \
+or rotated into illegibility, series labels detached from what they label.
+   - Tables: cell text clipped by the cell or row height or wrapping into an \
+unreadable stack, columns too narrow for their content, headers not aligned with \
+their columns, a table extending past the slide.
+   - Diagrams, SmartArt and grouped shapes: labels wider than the node or box \
+that holds them, text escaping a connector or arrow, node labels overlapping \
+neighbouring nodes or connectors.
+
+"observations" — everything that is a matter of judgement rather than a defect: \
+text sized badly for the space it occupies, comparable elements at visibly \
+different sizes, uneven gaps, inconsistent alignment or spacing, and template \
+fidelity (colors, fonts, logo placement, layout usage{ref_clause}). These are \
+reported to the author and never make a deck fail — do not let them influence \
+"passed", and do not repeat an entry from "issues" here.
+
+Report each problem separately, naming the element it affects (e.g. "chart on \
+the right: x-axis labels overlap"), and say in "suggested_fix" what change would \
+resolve it (resize, reposition, shorten the text, smaller font, wider column, \
+hide the legend).
 
 Respond with ONLY a JSON object, no markdown fence:
 {{"passed": true|false, "issues": [{{"slide": <1-based number>, "severity": \
-"critical"|"major"|"minor", "description": "...", "suggested_fix": "..."}}]}}
-Unreadable or overlapping text is at least a major issue. "passed" is true only \
-when there are no critical or major issues."""
+"critical"|"major"|"minor", "description": "...", "suggested_fix": "..."}}], \
+"observations": [{{"slide": <1-based number>, "description": "..."}}]}}
+Unreadable or overlapping text is at least a major issue. "passed" is true when \
+"issues" holds no critical or major entry, whatever "observations" contains."""
 
 
 class VisionLLMConfigError(VisualQAError):
@@ -297,7 +332,22 @@ def _with_api_version(url: str) -> str:
     return f"{url}{'&' if urlparse(url).query else '?'}api-version={version}"
 
 
-def _resolve_provider() -> str:
+def _role_env(name: str, role: str) -> str:
+    """VISION_LLM_<NAME>_<ROLE>, falling back to VISION_LLM_<NAME>.
+
+    Reviewing is detection and planning a repair is reasoning; they are worth
+    running on different models. Resolving per role here is what lets an
+    operator split them by setting one variable, while every deployment that
+    sets only the plain variable keeps one model for both.
+    """
+    if role:
+        value = os.environ.get(f"{name}_{role.upper()}")
+        if value:
+            return value
+    return os.environ.get(name)
+
+
+def _resolve_provider(endpoint: str = None) -> str:
     """Which backend serves the vision LLM:
     - "direct": VISION_LLM_ENDPOINT + VISION_LLM_API_KEY (OpenAI Responses
       API, Azure OpenAI included) — the default whenever an endpoint is set.
@@ -305,21 +355,27 @@ def _resolve_provider() -> str:
       {DIAL_CORE_URL}/openai/deployments/{model}/chat/completions with DIAL
       credentials (caller headers first, DIAL_API_KEY fallback — the same
       resolution as file storage).
-    VISION_LLM_PROVIDER=direct|dial overrides the inference."""
+    VISION_LLM_PROVIDER=direct|dial overrides the inference.
+
+    `endpoint` is the endpoint of the role asking (see _role_env); the plain
+    VISION_LLM_ENDPOINT is used when no role narrows it."""
     value = os.environ.get("VISION_LLM_PROVIDER", "").lower()
     if value in ("direct", "azure", "openai"):
         return "direct"
     if value in ("dial", "dial-core", "dial_core"):
         return "dial"
-    return "direct" if os.environ.get("VISION_LLM_ENDPOINT") else "dial"
+    if endpoint is None:
+        endpoint = os.environ.get("VISION_LLM_ENDPOINT")
+    return "direct" if endpoint else "dial"
 
 
 class VisionLLM:
-    def __init__(self):
-        self.model = os.environ.get("VISION_LLM_MODEL")
-        self.provider = _resolve_provider()
-        self.endpoint = os.environ.get("VISION_LLM_ENDPOINT")
-        self.api_key = os.environ.get("VISION_LLM_API_KEY")
+    def __init__(self, role: str = "review"):
+        self.role = role
+        self.model = _role_env("VISION_LLM_MODEL", role)
+        self.endpoint = _role_env("VISION_LLM_ENDPOINT", role)
+        self.api_key = _role_env("VISION_LLM_API_KEY", role)
+        self.provider = _resolve_provider(self.endpoint)
         self.dial_url = os.environ.get("DIAL_CORE_URL")
         if not self.model:
             raise VisionLLMConfigError(
@@ -346,7 +402,8 @@ class VisionLLM:
                     "type": "image_url",
                     "image_url": {"url": f"data:image/png;base64,{b64}"},
                 })
-            return {"messages": [{"role": "user", "content": content}]}
+            return self._with_reasoning(
+                {"messages": [{"role": "user", "content": content}]})
         content = [{"type": "input_text", "text": prompt}]
         for png in images:
             b64 = base64.b64encode(png).decode()
@@ -354,8 +411,26 @@ class VisionLLM:
                 "type": "input_image",
                 "image_url": f"data:image/png;base64,{b64}",
             })
-        return {"model": self.model,
-                "input": [{"role": "user", "content": content}]}
+        return self._with_reasoning(
+            {"model": self.model,
+             "input": [{"role": "user", "content": content}]})
+
+    def _with_reasoning(self, payload: dict) -> dict:
+        """Attach a reasoning-effort hint for this role, if one is configured.
+
+        Nothing is sent when the variable is unset: Azure and DIAL both reject
+        an unrecognised parameter on some deployments, so an unasked-for field
+        is a failed call, not a no-op.
+        """
+        effort = os.environ.get(
+            f"VISION_LLM_{self.role.upper()}_REASONING", "").strip()
+        if not effort:
+            return payload
+        if self.provider == "dial":
+            payload["reasoning_effort"] = effort
+        else:
+            payload["reasoning"] = {"effort": effort}
+        return payload
 
     def _request_target(self):
         """(url, headers) for the configured provider."""
@@ -412,12 +487,13 @@ class VisionLLM:
             verdict = json.loads(candidate)
             if isinstance(verdict, dict) and "passed" in verdict:
                 verdict.setdefault("issues", [])
+                verdict.setdefault("observations", [])
                 return verdict
         except json.JSONDecodeError:
             pass
         logger.warning("vision_verdict_unparseable chars=%d preview=%s",
                        len(text), flatten(text[:200]))
-        return {"passed": None, "issues": [],
+        return {"passed": None, "issues": [], "observations": [],
                 "raw_review": text,
                 "note": "Reviewer response was not valid JSON; see raw_review."}
 
@@ -425,9 +501,14 @@ class VisionLLM:
         """Send prompt + images, return the model's raw text answer."""
         url, headers = self._request_target()
         payload = self.build_payload(images, prompt)
-        logger.debug("vision_request provider=%s model=%s images=%d "
-                     "prompt_chars=%d timeout_s=%.0f",
-                     self.provider, self.model, len(images), len(prompt), timeout)
+        if logger.isEnabledFor(logging.DEBUG):
+            # PNG -> base64 inflates every image by a third, on every round;
+            # the payload is the one cost here that nothing else reports.
+            logger.debug("vision_request provider=%s model=%s role=%s images=%d "
+                         "prompt_chars=%d payload_bytes=%d timeout_s=%.0f",
+                         self.provider, self.model, self.role, len(images),
+                         len(prompt), sum(len(p) for p in images) * 4 // 3,
+                         timeout)
         started = time.monotonic()
         r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -539,6 +620,11 @@ def _subset_deck_bytes(pres, slides):
 
     buf = io.BytesIO()
     pres.save(buf)
+    if len(slides) >= len(pres.slides):
+        # Nothing to trim: the selection already is the deck. Reopening it
+        # only to delete no slides and serialize it again costs a second full
+        # save of a deck that can run to tens of megabytes.
+        return buf.getvalue()
     buf.seek(0)
     subset = Presentation(buf)
     keep = set(slides)
@@ -550,22 +636,210 @@ def _subset_deck_bytes(pres, slides):
     return out.getvalue()
 
 
-def _render_deck(pres, max_slides=None, slides=None):
+def _render_deck(pres, max_slides=None, slides=None, dpi=None):
+    """Render `pres` (or a slide subset of it) to PNGs.
+
+    dpi=None keeps the renderer's own default, which is what the preview and
+    summary-card composers want; the review path passes _render_dpi().
+    """
     import io
+    extra = {} if dpi is None else {"dpi": dpi}
     if slides:
         # slides is always pre-sorted (normalize_slides / the repair loop's
         # own image_slides), so the subset deck's page order already matches
         # what callers expect back — no slides= filtering needed downstream.
         return render_pptx_bytes_to_pngs(_subset_deck_bytes(pres, slides),
-                                         max_slides=max_slides)
+                                         max_slides=max_slides, **extra)
     buf = io.BytesIO()
     pres.save(buf)
     return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides,
-                                     slides=slides)
+                                     slides=slides, **extra)
+
+
+DEFAULT_RENDER_DPI = 150
+
+
+def _render_dpi():
+    """Resolution of the images the reviewer is shown.
+
+    The renderer's own default (96 dpi, 1280x720) leaves small text marginal,
+    and a reviewer that cannot quite read a label reports it as unreadable —
+    a false finding costs a whole repair round, which is far more than the
+    larger image costs. Lower it with VISUAL_QA_RENDER_DPI where the payload
+    size matters more than the false-finding rate.
+    """
+    raw = os.environ.get("VISUAL_QA_RENDER_DPI", "").strip()
+    if not raw:
+        return DEFAULT_RENDER_DPI
+    try:
+        return max(36, int(raw))
+    except ValueError:
+        logger.warning("invalid_render_dpi value=%r falling_back_to_default",
+                       raw)
+        return DEFAULT_RENDER_DPI
 
 
 def _slide_cap():
     return int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+
+
+# ---- What the loop acts on ----
+
+# Severity of an issue, ranked. An issue with no severity, or one the
+# reviewer invented, counts as "major": acting on it is what this loop did
+# before severities were filtered at all, so it is the conservative reading.
+_SEVERITY_RANK = {"critical": 3, "major": 2, "minor": 1}
+_DEFAULT_SEVERITY = "major"
+
+
+def _severity_rank(issue) -> int:
+    value = str(issue.get("severity", "") or "").strip().lower()
+    return _SEVERITY_RANK.get(value, _SEVERITY_RANK[_DEFAULT_SEVERITY])
+
+
+def repair_severity_floor() -> str:
+    """Lowest severity that may drive another repair round
+    (VISUAL_QA_REPAIR_SEVERITY, default "major").
+
+    Below the floor an issue is still reported to the agent; it just does not
+    buy a render, a plan and a re-review of its own. A cosmetic finding the
+    reviewer will report again next round is otherwise indistinguishable from
+    a defect, and burns the budget at the same rate."""
+    value = os.environ.get("VISUAL_QA_REPAIR_SEVERITY", "").strip().lower()
+    return value if value in _SEVERITY_RANK else _DEFAULT_SEVERITY
+
+
+def _actionable(issues) -> list:
+    floor = _SEVERITY_RANK[repair_severity_floor()]
+    return [i for i in issues if _severity_rank(i) >= floor]
+
+
+def _iteration_budget(slides, max_iterations=None) -> int:
+    """How many inspect/repair rounds this call may run.
+
+    An explicit argument always wins. Otherwise the budget follows the scope:
+    VISUAL_QA_MAX_ITERATIONS is a whole-deck number, and spending it on a
+    single slide is how a 20-second call becomes a 200-second one — a slide
+    that two rounds cannot fix needs its content rebuilt, not a third round.
+    """
+    if max_iterations is None:
+        name = ("VISUAL_QA_MAX_ITERATIONS_SLIDE" if slides
+                else "VISUAL_QA_MAX_ITERATIONS")
+        default = "2" if slides else "10"
+        raw = os.environ.get(name, "").strip() or default
+        try:
+            max_iterations = int(raw)
+        except ValueError:
+            logger.warning("invalid_max_iterations var=%s value=%r "
+                           "falling_back_to_default", name, raw)
+            max_iterations = int(default)
+    return max(1, max_iterations)
+
+
+# deck_validation codes naming a geometry defect that a whitelisted repair
+# operation can actually fix, and the severity each is worth to the planner.
+# Nothing else it reports belongs here: a broken relationship is not
+# geometry, and a distorted picture is geometry nothing in the whitelist can
+# undo (see deck_validation._check_picture) — that one is an observation.
+_REPAIRABLE_VALIDATION_CODES = {
+    "shape_off_slide": "critical",
+    "zero_sized_shape": "critical",
+    "partial_transform": "major",
+}
+_OBSERVED_VALIDATION_CODES = ("distorted_picture",)
+
+
+def _to_slide_number(problem):
+    """deck_validation numbers slides from 0 (`slide_index`); visual_qa and
+    visual_fix number them from 1 (`slide`). This is the only place the two
+    conventions meet — convert here, nowhere else."""
+    index = problem.get("slide_index")
+    if not isinstance(index, int) or isinstance(index, bool):
+        return None
+    return index + 1
+
+
+def _renumber(message, number):
+    """Rewrite deck_validation's own 0-based "Slide N," prefix, so everything
+    the planner and the agent read counts slides the same way."""
+    return re.sub(r"^Slide \d+,", f"Slide {number},", message or "", count=1)
+
+
+def structural_findings(pres, slides=None):
+    """Geometry defects found without rendering anything.
+
+    Returns (issues, observations) in the reviewer's own vocabulary, so the
+    loop can feed them to the planner beside what the model saw. A shape
+    parked off the slide is a fact about the XML, not a judgement about
+    pixels: paying a vision round to discover it — and another to confirm the
+    fix — is the most expensive way to learn something that takes
+    milliseconds. deck_validation's "fix" strings already name the repair
+    operation that resolves each one, which is exactly what the planner needs.
+    """
+    import deck_validation
+
+    try:
+        report = deck_validation.validate_presentation(pres)
+    except Exception as e:  # never fail a QA call over the cheap check
+        logger.warning("qa_validation_skipped error=%s", e)
+        return [], []
+    issues, observations = [], []
+    for problem in report.get("problems", []):
+        code = problem.get("code")
+        number = _to_slide_number(problem)
+        if number is None or (slides and number not in slides):
+            continue
+        message = _renumber(problem.get("message", ""), number)
+        if code in _REPAIRABLE_VALIDATION_CODES:
+            issues.append({
+                "slide": number,
+                "severity": _REPAIRABLE_VALIDATION_CODES[code],
+                "source": "structure",
+                "description": message,
+                "suggested_fix": problem.get("fix", ""),
+            })
+        elif code in _OBSERVED_VALIDATION_CODES:
+            observations.append({"slide": number, "source": "structure",
+                                 "description": message,
+                                 "suggested_fix": problem.get("fix", "")})
+    return issues, observations
+
+
+def _in_scope(entries, slides):
+    """Findings on the slides this call is about. An entry that names no
+    slide is kept: it is about the selection as a whole."""
+    if not slides:
+        return list(entries)
+    return [e for e in entries
+            if not isinstance(e, dict) or e.get("slide") in slides
+            or e.get("slide") is None]
+
+
+def _accept_seed(initial_verdict, slides):
+    """Validate a verdict the caller already paid for, or None.
+
+    It arrives from the orchestrator, so it is checked rather than trusted,
+    and its issues go through the same scope filter as a fresh review's —
+    a seeded verdict must not be able to move a slide nobody put in scope.
+    """
+    if initial_verdict is None:
+        return None
+    reason = None
+    if not isinstance(initial_verdict, dict):
+        reason = "not_an_object"
+    elif "passed" not in initial_verdict:
+        reason = "no_passed_key"
+    elif not isinstance(initial_verdict.get("issues", []), list):
+        reason = "issues_not_a_list"
+    if reason:
+        logger.warning("qa_seed_ignored reason=%s", reason)
+        return None
+    seed = dict(initial_verdict)
+    seed["issues"] = [i for i in seed.get("issues", [])
+                      if isinstance(i, dict)
+                      and (not slides or i.get("slide") in slides)]
+    seed.setdefault("observations", [])
+    return seed
 
 
 def inspect_presentation(pres, reference_pres=None, focus: str = None,
@@ -576,17 +850,23 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
     slides: 1-based slide numbers to review; None reviews the whole deck
     (capped by VISION_LLM_MAX_SLIDES). Issue slide numbers in the verdict are
     always absolute deck positions, not positions within the selection.
+
+    "issues" holds objective defects and decides "passed"; "observations"
+    holds the reviewer's judgements about composition, which are reported but
+    never fail a deck.
     Raises VisualQAError on infrastructure failure (renderer/LLM).
     """
     llm = VisionLLM()
     max_slides = None if slides else _slide_cap()
+    dpi = _render_dpi()
 
-    deck_images = _render_deck(pres, max_slides, slides)
-    ref_images = _render_deck(reference_pres, _slide_cap()) \
+    deck_images = _render_deck(pres, max_slides, slides, dpi)
+    ref_images = _render_deck(reference_pres, _slide_cap(), dpi=dpi) \
         if reference_pres is not None else []
 
+    structural, observed = structural_findings(pres, slides)
     prompt = review_prompt(bool(ref_images), focus, slides,
-                           fonts.unreliable_fonts_in(pres))
+                           fonts.unreliable_fonts_in(pres), structural)
     if ref_images:
         prompt += (
             f"\nImage order: images 1-{len(ref_images)} are the reference "
@@ -596,60 +876,98 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
         )
     verdict = llm.review(ref_images + deck_images, prompt)
     verdict["slides_reviewed"] = slides or len(deck_images)
+    # The structural pass is cheap and certain, so its findings join the
+    # reviewer's rather than waiting for the model to notice them.
+    if structural:
+        verdict["issues"] = structural + list(verdict.get("issues", []))
+        verdict["passed"] = False
+    if observed:
+        verdict["observations"] = observed + list(
+            verdict.get("observations", []))
     logger.info("inspection_done slides=%d scope=%s reference=%s passed=%s "
-                "issues=%d", len(deck_images),
+                "issues=%d structural=%d", len(deck_images),
                 ",".join(map(str, slides)) if slides else "deck",
                 bool(ref_images), verdict.get("passed"),
-                len(verdict.get("issues", [])))
+                len(verdict.get("issues", [])), len(structural))
     return verdict
 
 
 def inspect_and_repair(pres, slides: list = None, focus: str = None,
-                       max_iterations: int = None) -> dict:
+                       max_iterations: int = None, *,
+                       initial_verdict: dict = None) -> dict:
     """Inspect/repair loop: inspect the selected slides; on failure, repair
     them in place via LLM-planned whitelisted operations (visual_fix.py) and
-    inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 10) inspections.
+    inspect again, up to the iteration budget (see _iteration_budget).
 
     slides: 1-based slide numbers to work on; None means the whole deck.
     Repairs are confined to the reviewed slides — issues reported against
     other slides are ignored, so a caller iterating slide by slide never has
     the model rewrite a slide it did not ask about.
 
+    initial_verdict: a verdict the caller already holds for these same slides
+    (typically the one visual_inspect_slides just returned). It stands in for
+    the first review, which is the single largest saving available here: the
+    first round of a repair otherwise re-asks the model a question that was
+    answered seconds ago. It is validated, not trusted; anything unusable is
+    logged and a normal first review runs instead.
+
     Returns {"passed": bool, "iterations": n, "repair_rounds": [...],
-    "issues": [...]} — "issues" holds what remains when passed is False.
+    "issues": [...], "observations": [...]} — "issues" holds what remains when
+    passed is False.
     Raises VisualQAError on infrastructure failure (renderer/LLM).
     """
     import visual_fix
 
-    llm = VisionLLM()
+    reviewer = VisionLLM("review")
+    planner = VisionLLM("plan")
     max_slides = None if slides else _slide_cap()
-    if max_iterations is None:
-        max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10"))
-    max_iterations = max(1, max_iterations)
+    dpi = _render_dpi()
+    max_iterations = _iteration_budget(slides, max_iterations)
+    seed = _accept_seed(initial_verdict, slides)
 
     # Constant for the whole loop: repairs never change which fonts the deck
     # names, and re-scanning per round would only cost time.
     risky_fonts = fonts.unreliable_fonts_in(pres)
     repair_rounds = []
     verdict = {}
+    issues, observations = [], []
+    previous_count = None
+    stop_reason = None
     loop_started = time.monotonic()
-    logger.info("qa_loop_start scope=%s slides_cap=%s max_iterations=%d",
+    logger.info("qa_loop_start scope=%s slides_cap=%s max_iterations=%d "
+                "seeded=%s severity_floor=%s",
                 ",".join(map(str, slides)) if slides else "deck",
-                max_slides, max_iterations)
+                max_slides, max_iterations, str(seed is not None).lower(),
+                repair_severity_floor())
     for iteration in range(1, max_iterations + 1):
         round_started = time.monotonic()
-        deck_images = _render_deck(pres, max_slides, slides)
-        # Absolute slide number of each image, so issues and repairs address
-        # deck positions even when only a subset was rendered.
-        image_slides = slides or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images,
-                             review_prompt(False, focus, slides, risky_fonts))
-        verdict["slides_reviewed"] = slides or len(deck_images)
-        issues = [i for i in verdict.get("issues", [])
-                  if not slides or i.get("slide") in slides]
+        # The structural pass runs every round, not only the first: it is
+        # milliseconds, and re-running it is how a geometry repair gets
+        # confirmed without a vision call.
+        structural, observed = structural_findings(pres, slides)
+        if iteration == 1 and seed is not None:
+            # The images are only needed to plan a repair, and a seeded round
+            # that already passes never plans one — so do not render yet.
+            deck_images, verdict = None, seed
+        else:
+            deck_images = _render_deck(pres, max_slides, slides, dpi)
+            verdict = reviewer.review(
+                deck_images,
+                review_prompt(False, focus, slides, risky_fonts, structural))
+        reviewed_count = (len(deck_images) if deck_images is not None
+                          else len(slides or pres.slides))
+        verdict["slides_reviewed"] = slides or reviewed_count
+        reviewed = [i for i in verdict.get("issues", [])
+                    if not slides or i.get("slide") in slides]
+        issues = structural + reviewed
+        observations = observed + _in_scope(
+            verdict.get("observations", []), slides)
+        actionable = _actionable(issues)
         logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
-                    "duration_ms=%d", iteration, max_iterations,
-                    len(deck_images), verdict.get("passed"), len(issues),
+                    "structural=%d actionable=%d duration_ms=%d",
+                    iteration, max_iterations, reviewed_count,
+                    verdict.get("passed"), len(issues), len(structural),
+                    len(actionable),
                     int((time.monotonic() - round_started) * 1000))
         if logger.isEnabledFor(logging.DEBUG):
             for issue in issues:
@@ -657,26 +975,51 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                              "description=%s", iteration, issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if verdict.get("passed") is True or (slides and not issues
-                                             and verdict.get("passed") is not None):
+        if repair_rounds:
+            # Filled in a round late, because "did that round help?" is a
+            # question only the next round's count can answer. Counted the
+            # same way as issues_found, so the pair is comparable.
+            repair_rounds[-1]["issues_remaining"] = len(actionable)
+        if not structural and (
+                verdict.get("passed") is True
+                or (slides and not reviewed
+                    and verdict.get("passed") is not None)):
             # Passing verdict, or no issue left on the slides in scope.
             logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
                         "duration_ms=%d", iteration, len(repair_rounds),
                         int((time.monotonic() - loop_started) * 1000))
-            return {"passed": True, "iterations": iteration,
-                    "repair_rounds": repair_rounds}
-        if iteration == max_iterations or not issues:
-            # Out of budget, or nothing actionable (e.g. unparseable review)
+            out = {"passed": True, "iterations": iteration,
+                   "repair_rounds": repair_rounds}
+            if observations:
+                out["observations"] = observations
+            return out
+        if iteration == max_iterations:
+            stop_reason = "budget_exhausted"
+        elif not issues:
+            # Nothing actionable (e.g. an unparseable review)
+            stop_reason = "no_actionable_issues"
+        elif not actionable:
+            stop_reason = "no_severity_match"
+        elif previous_count is not None and len(actionable) >= previous_count:
+            # Repairs are landing and the findings are not going down. Another
+            # round costs the same and reaches the same place.
+            stop_reason = "issues_not_reducing"
+        if stop_reason:
             logger.warning("qa_loop_stop reason=%s iteration=%d",
-                           "budget_exhausted" if iteration == max_iterations
-                           else "no_actionable_issues", iteration)
+                           stop_reason, iteration)
             break
-        plan = visual_fix.plan_repairs(llm, issues, pres, deck_images,
+        previous_count = len(actionable)
+        if deck_images is None:
+            deck_images = _render_deck(pres, max_slides, slides, dpi)
+        # Absolute slide number of each image, so issues and repairs address
+        # deck positions even when only a subset was rendered.
+        image_slides = slides or list(range(1, len(deck_images) + 1))
+        plan = visual_fix.plan_repairs(planner, actionable, pres, deck_images,
                                        image_slides)
         result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
         round_report = {
             "iteration": iteration,
-            "issues_found": len(issues),
+            "issues_found": len(actionable),
             "operations_applied": len(result["applied"]),
             "operations_skipped": len(result["skipped"]),
         }
@@ -689,21 +1032,41 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                 result["skipped"])
         repair_rounds.append(round_report)
         if not result["applied"]:
+            stop_reason = "no_repair_progress"
             logger.warning("qa_loop_stop reason=no_repair_progress iteration=%d "
                            "operations_planned=%d operations_skipped=%d",
                            iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
 
-    remaining = [i for i in verdict.get("issues", [])
-                 if not slides or i.get("slide") in slides]
     out = {"passed": False,
            "iterations": len(repair_rounds) + 1,
            "repair_rounds": repair_rounds,
-           "issues": remaining}
-    if repair_rounds and not repair_rounds[-1]["operations_applied"]:
-        # Tell the agent what a zero-applied round means, so it stops the
-        # deck rather than re-running an identical call.
-        out["repair_note"] = (
+           "issues": issues,
+           "stop_reason": stop_reason}
+    if observations:
+        out["observations"] = observations
+    note = _repair_note(stop_reason, repair_rounds)
+    if note:
+        out["repair_note"] = note
+    logger.warning("qa_loop_failed iterations=%d repair_rounds=%d "
+                   "unresolved_issues=%d reason=%s duration_ms=%d",
+                   out["iterations"], len(repair_rounds), len(issues),
+                   stop_reason, int((time.monotonic() - loop_started) * 1000))
+    for key in ("raw_review", "note"):
+        if key in verdict:
+            out[key] = verdict[key]
+    return out
+
+
+def _repair_note(stop_reason, repair_rounds):
+    """What a failed loop should tell the agent to do next.
+
+    Every one of these ends the same way — do not call this tool again — but
+    for different reasons, and the reason is what decides the agent's next
+    move: reach for a different tool, or accept the finding.
+    """
+    if stop_reason == "no_repair_progress" and repair_rounds:
+        return (
             "The last round changed nothing: every planned operation was "
             "rejected (" + ", ".join(
                 f"{reason} x{count}" for reason, count
@@ -714,18 +1077,36 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
               "Fix the content yourself with the editing tools, or report "
               "the issue to the user. Repeating this call will not help."
         )
-    logger.warning("qa_loop_failed iterations=%d repair_rounds=%d "
-                   "unresolved_issues=%d duration_ms=%d",
-                   out["iterations"], len(repair_rounds), len(remaining),
-                   int((time.monotonic() - loop_started) * 1000))
-    for key in ("raw_review", "note"):
-        if key in verdict:
-            out[key] = verdict[key]
-    return out
+    if stop_reason == "issues_not_reducing":
+        return (
+            "Repairs are being applied but the findings are not going down, "
+            "so the loop stopped rather than spend the rest of its budget. "
+            "The remaining issues need different content, not different "
+            "geometry: rebuild this slide with the editing tools — shorten "
+            "the text, split it across two slides, or use a layout with more "
+            "room — and inspect again. Repeating this call will not help."
+        )
+    if stop_reason == "no_severity_match":
+        return (
+            "The issues that remain are all below "
+            f"VISUAL_QA_REPAIR_SEVERITY ({repair_severity_floor()}), so no "
+            "repair round was spent on them. They are listed for you to "
+            "judge: fix them with the editing tools if they matter, or leave "
+            "them."
+        )
+    if stop_reason == "budget_exhausted":
+        return (
+            "The iteration budget ran out with issues still open. Another "
+            "identical call would start from the same place — edit the slide "
+            "content yourself and inspect again, or tell the user what "
+            "remains."
+        )
+    return None
 
 
 def review_prompt(has_reference: bool, focus: str = None,
-                  slides: list = None, risky_fonts=None) -> str:
+                  slides: list = None, risky_fonts=None,
+                  structural=None) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
@@ -741,6 +1122,16 @@ def review_prompt(has_reference: bool, focus: str = None,
             "position, and judge each slide on its own merits."
         )
     prompt += fonts.qa_font_caveat(risky_fonts)
+    if structural:
+        # Already known, already being repaired. Telling the reviewer keeps it
+        # from spending its attention — and a line of the verdict — on a
+        # finding that is on its way out anyway.
+        listed = "\n".join(f"- slide {i.get('slide')}: {i.get('description')}"
+                            for i in structural)
+        prompt += (
+            "\nA structural check of the file has already found these, and "
+            "they are being fixed; do not report them again:\n" + listed
+        )
     if focus:
         prompt += f"\nAdditional focus requested by the caller: {focus}"
     return prompt

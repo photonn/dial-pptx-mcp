@@ -429,10 +429,20 @@ class TestReviewChecklist(unittest.TestCase):
                        "grouped shapes", "overlapping"):
             self.assertIn(phrase, prompt)
 
-    def test_prompt_covers_text_sized_badly_for_its_box(self):
+    def test_judgements_are_observations_not_issues(self):
+        """Sizing, spacing and brand fidelity are reported, but they must not
+        be able to fail a deck — that is what kept the loop running to its
+        budget on decks with nothing broken on them."""
         prompt = visual_qa.review_prompt(False)
-        self.assertIn("mostly empty", prompt)
-        self.assertIn("without crowding", prompt)
+        issues, observations = prompt.split('"observations"', 1)
+        for judgement in ("text sized badly", "visibly different sizes",
+                          "uneven gaps", "inconsistent alignment",
+                          "template fidelity"):
+            self.assertIn(judgement, observations)
+            self.assertNotIn(judgement, issues)
+        self.assertIn("never make a deck fail", observations)
+        self.assertIn('"passed" is true when "issues" holds no critical or '
+                      "major entry", prompt)
 
     def test_repair_prompt_advertises_the_new_operations(self):
         for op in ("set_column_width", "set_row_height", "set_cell_text",
@@ -527,19 +537,62 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         self.assertEqual(outcome["repair_rounds"][0]["operations_applied"], 1)
 
     def test_gives_up_after_max_iterations(self):
-        failing = {"passed": False,
-                   "issues": [{"slide": 1, "description": "x"}]}
+        """Findings that shrink every round are worth another round — until
+        the budget says otherwise."""
         plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                  "size_pt": 20}]
+        verdicts = [
+            {"passed": False, "issues": [{"slide": 1, "description": "a"},
+                                         {"slide": 1, "description": "b"},
+                                         {"slide": 1, "description": "c"}]},
+            {"passed": False, "issues": [{"slide": 1, "description": "a"},
+                                         {"slide": 1, "description": "b"}]},
+            {"passed": False, "issues": [{"slide": 1, "description": "a"}]},
+        ]
         os.environ["VISUAL_QA_MAX_ITERATIONS"] = "3"
         try:
-            outcome, calls = self._run([failing], [plan])
+            outcome, calls = self._run(verdicts, [plan])
         finally:
             os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
         self.assertFalse(outcome["passed"])
         self.assertEqual(calls["review"], 3)
         self.assertEqual(len(outcome["repair_rounds"]), 2)
+        self.assertEqual(outcome["stop_reason"], "budget_exhausted")
         self.assertTrue(outcome["issues"])
+
+    def test_stops_when_repairs_stop_reducing_the_findings(self):
+        """Operations land, the count does not move: the next round would
+        buy the same thing again."""
+        failing = {"passed": False,
+                   "issues": [{"slide": 1, "description": "x"}]}
+        plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                 "size_pt": 20}]
+        os.environ["VISUAL_QA_MAX_ITERATIONS"] = "10"
+        try:
+            outcome, calls = self._run([failing], [plan])
+        finally:
+            os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
+        self.assertEqual(calls["review"], 2)
+        self.assertEqual(outcome["stop_reason"], "issues_not_reducing")
+        self.assertEqual(outcome["repair_rounds"][0]["issues_remaining"], 1)
+        self.assertIn("rebuild this slide", outcome["repair_note"])
+
+    def test_issues_below_the_severity_floor_never_buy_a_round(self):
+        cosmetic = {"passed": False,
+                    "issues": [{"slide": 1, "severity": "minor",
+                                "description": "a hair off centre"}]}
+        outcome, calls = self._run([cosmetic], [[]])
+        self.assertEqual(calls["review"], 1)
+        self.assertEqual(calls["plan"], 0)
+        self.assertEqual(outcome["stop_reason"], "no_severity_match")
+        self.assertEqual(len(outcome["issues"]), 1)   # still reported
+
+    def test_an_absent_severity_still_counts_as_major(self):
+        """Acting on an unlabelled issue is what the loop did before the
+        floor existed; the floor must not quietly stop doing it."""
+        self.assertTrue(visual_qa._actionable([{"description": "x"}]))
+        self.assertTrue(visual_qa._actionable([{"severity": "CRITICAL"}]))
+        self.assertFalse(visual_qa._actionable([{"severity": "minor"}]))
 
     def test_stops_early_when_no_repairs_apply(self):
         failing = {"passed": False,

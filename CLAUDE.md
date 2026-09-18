@@ -177,7 +177,8 @@ on a pod regardless of which tools are in flight.
 **Visual QA (`visual_qa.py`, `visual_fix.py`, `tools/visual_tools.py`).** Agent-driven, not an export gate: when a vision
 LLM is configured, `register_visual_tools` exposes `visual_inspect_slides` (read-only review) and `visual_repair_slides`
 (review → repair → re-review loop), both taking an optional 1-based `slides` list so the orchestrator can check the one
-slide it just built, as often as it likes. Pipeline: render via LibreOffice → PDF → PNG, vision-LLM review, then
+slide it just built, as often as it likes. Pipeline: render via LibreOffice → PDF → PNG (at `VISUAL_QA_RENDER_DPI`, default 150 — previews and summary
+cards keep the renderer's own 96), vision-LLM review, then
 `visual_fix.plan_repairs` asks the model for a plan of **whitelisted, validated** operations
 (move/resize/font-size/fit-text/autofit/set-text/word-wrap/delete, plus table column-width/row-height/cell-text and
 chart legend/data-label toggles and axis titles) applied with python-pptx, re-render, repeat up to
@@ -197,6 +198,34 @@ shrinks. The geometric estimate (`CHAR_WIDTH_RATIO`, `LINE_HEIGHT_RATIO`, `FIT_S
 re-render is the real check — but the growth cap (`MAX_GROWTH_FACTOR`, `DEFAULT_GROWTH_CEILING_PT`) is policy, not
 approximation: without it any short string "fits" at the 96pt ceiling.
 
+**The loop's cost is its round count, so four things bound it.** (1) `visual_repair_slides(issues=...)` seeds
+`inspect_and_repair(initial_verdict=)` with the verdict the orchestrator already holds, which removes the first
+review entirely — the seed is validated (`_accept_seed`) and scope-filtered, never trusted, because it arrives from
+the orchestrator. (2) The budget follows the scope (`_iteration_budget`): `VISUAL_QA_MAX_ITERATIONS` is a deck
+number, `VISUAL_QA_MAX_ITERATIONS_SLIDE` (2) is the per-slide one. (3) Only issues at or above
+`VISUAL_QA_REPAIR_SEVERITY` (`major`) drive a round; the rest are reported. A missing severity counts as `major`,
+which is what the loop did before the floor existed. (4) The loop stops when the in-scope count stops falling
+(`issues_not_reducing`) — every exit sets a `stop_reason` and `_repair_note` turns it into the agent's next move,
+because "call this again" is never one of them.
+
+**`passed` has to be answerable.** `REVIEW_PROMPT` returns `issues` (objective, pixel-verifiable defects — overflow,
+overlap, off-slide, unfilled placeholders, broken charts) and `observations` (sizing, spacing, alignment, brand
+fidelity). Only `issues` decide `passed`, and only they reach `plan_repairs`. The two were one list, and a prompt
+that asks a strict reasoning model to critique typography *and* fails the deck on what it finds will always find
+something — that single interaction is what ran the budget to its end on decks with nothing broken on them.
+
+**What `deck_validation` can see, the model should not have to.** `structural_findings` runs before every review and
+maps geometry defects (`shape_off_slide`, `zero_sized_shape`, `partial_transform`) into the reviewer's issue
+vocabulary, using their `fix` strings — which already name repair operations — as `suggested_fix`; a distorted
+picture becomes an *observation*, since nothing in the whitelist can un-distort one. **`deck_validation` numbers
+slides from 0 (`slide_index`) and visual QA from 1 (`slide`)**: `_to_slide_number`/`_renumber` are the one place the
+two conventions meet, including inside the message text.
+
+`convert_with_soffice` seeds its per-conversion profile and fontconfig cache from the templates named by
+`PPT_MCP_SOFFICE_PROFILE_TEMPLATE`/`_CACHE_TEMPLATE` (built in the Dockerfile) — copying beats building both from
+nothing, which on a one-slide deck costs more than rendering the slide (1.6s → 1.0s measured). The copy is
+per-conversion and stays that way; sharing one profile is the lock fight the isolation exists to prevent.
+
 Slide scoping runs through the whole stack and must stay consistent: LibreOffice always converts the entire deck, so a
 subset only selects pages to rasterize; `image_slides` maps images back to absolute slide numbers for `plan_repairs`; and
 `apply_repairs(..., allowed_slides=)` drops operations aimed at slides outside the scope. Issue slide numbers reported to
@@ -211,7 +240,11 @@ off by default); with it off, export just reports `visual_qa: passed|unverified|
 Only a clean whole-deck inspection calls `clear_dirty`; both QA tools are in `state._NON_EDITING_TOOLS` so the wrapper
 does not re-dirty a deck they just certified. The reviewer reaches the model either at a direct OpenAI Responses-API
 endpoint or as a DIAL Core deployment (`_resolve_provider`); Azure and DIAL's Azure upstream both reject calls without
-`?api-version=`, added by `_with_api_version`.
+`?api-version=`, added by `_with_api_version`. `VisionLLM(role)` resolves its model, endpoint and key through
+`_role_env`: `VISION_LLM_MODEL_REVIEW`/`_PLAN` fall back to `VISION_LLM_MODEL`, so splitting detection from planning
+is one variable and changing nothing keeps one model for both. A reasoning-effort field is sent only when that
+role's `VISION_LLM_*_REASONING` is set — an unrecognised parameter is a failed call on some deployments, not a
+no-op.
 
 **Images (`tools/image_tools.py`).** The server never generates images; the orchestrator does, stores the result in DIAL
 files, and passes the `files/{bucket}/{path}` URL to `add_image_from_dial_url`, which downloads the bytes through

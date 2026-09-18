@@ -261,10 +261,18 @@ Design quality comes out of the loop, not out of the first attempt:
    `add_image_from_dial_url`).
 4. **Look at it** with `visual_inspect_slides(slides=[n])`. Inspecting the one
    slide you just built is cheap and precise, and catching a layout mistake now
-   is much cheaper than discovering it in all twelve copies later.
+   is much cheaper than discovering it in all twelve copies later. If it
+   reports issues, hand that same list back:
+   `visual_repair_slides(slides=[n], issues=<those issues>)` — the repair then
+   uses your inspection instead of paying for another one. When a repair round
+   says nothing was applied, or that the findings are not going down, the
+   remaining problem needs different content, not different geometry: shorten
+   the text, split the slide, or pick a roomier layout, and inspect again.
+   Its `observations` are advice, not defects — act on them or don't.
 5. **Repeat** for the rest of the deck.
-6. **Validate the whole deck**: `validate_presentation` for structure, then
-   `visual_repair_slides` for appearance.
+6. **Validate the whole deck**: `validate_presentation` for structure, then one
+   `visual_inspect_slides` with no `slides` argument for appearance — the
+   whole-deck pass is also the only thing that marks the deck checked.
 7. **Read the text back** with `extract_presentation_text` — check for missing
    sections, duplicated content, and template filler nobody replaced.
 8. **Export** with `export_presentation` and give the user the file URL.

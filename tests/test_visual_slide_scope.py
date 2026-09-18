@@ -107,7 +107,7 @@ class TestInspectTool(ToolTestCase):
     def test_inspects_only_requested_slides(self):
         seen = {}
 
-        def fake_render(pres, max_slides=None, slides=None):
+        def fake_render(pres, max_slides=None, slides=None, dpi=None):
             seen["slides"] = slides
             return [b"png"] * (len(slides) if slides else 3)
 
@@ -177,8 +177,10 @@ class TestRepairScope(ToolTestCase):
     def test_repair_tool_confines_operations_to_scope(self):
         seen = {}
 
-        def fake_inspect(pres, slides=None, focus=None, max_iterations=None):
-            seen.update(slides=slides, max_iterations=max_iterations)
+        def fake_inspect(pres, slides=None, focus=None, max_iterations=None,
+                         initial_verdict=None):
+            seen.update(slides=slides, max_iterations=max_iterations,
+                        seed=initial_verdict)
             return {"passed": True, "iterations": 1, "repair_rounds": []}
 
         with patch.object(visual_qa, "inspect_and_repair", fake_inspect):
@@ -187,6 +189,7 @@ class TestRepairScope(ToolTestCase):
         self.assertEqual(seen["slides"], [1, 3])
         self.assertEqual(seen["max_iterations"], 2)
         self.assertEqual(result["scope"], [1, 3])
+        self.assertIsNone(seen["seed"])
         # A scoped pass does not certify the whole deck.
         self.assertTrue(self.store.is_dirty(self.pid))
 

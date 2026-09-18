@@ -252,6 +252,52 @@ class TestRendering(unittest.TestCase):
         self.assertTrue(_slide_has_text(pres.slides[1], "Transform Your Business"))
 
 
+class TestSofficeProfileSeeding(unittest.TestCase):
+    """A pre-built profile makes soffice start faster; it must never make it
+    fail, and the per-conversion copy must stay per-conversion."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self._saved = os.environ.get("PPT_MCP_SOFFICE_PROFILE_TEMPLATE")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("PPT_MCP_SOFFICE_PROFILE_TEMPLATE", None)
+        else:
+            os.environ["PPT_MCP_SOFFICE_PROFILE_TEMPLATE"] = self._saved
+
+    def test_absent_or_unset_template_is_a_no_op(self):
+        import visual_qa
+        os.environ.pop("PPT_MCP_SOFFICE_PROFILE_TEMPLATE", None)
+        target = Path(self.tmp.name) / "profile"
+        self.assertFalse(visual_qa._seed_dir(
+            "PPT_MCP_SOFFICE_PROFILE_TEMPLATE", target))
+        os.environ["PPT_MCP_SOFFICE_PROFILE_TEMPLATE"] = str(
+            Path(self.tmp.name) / "nothing-here")
+        self.assertFalse(visual_qa._seed_dir(
+            "PPT_MCP_SOFFICE_PROFILE_TEMPLATE", target))
+        self.assertFalse(target.exists())
+
+    def test_template_is_copied_into_the_conversion_directory(self):
+        import visual_qa
+        template = Path(self.tmp.name) / "template"
+        (template / "user").mkdir(parents=True)
+        (template / "user" / "registrymodifications.xcu").write_text("<x/>")
+        os.environ["PPT_MCP_SOFFICE_PROFILE_TEMPLATE"] = str(template)
+        target = Path(self.tmp.name) / "profile"
+        self.assertTrue(visual_qa._seed_dir(
+            "PPT_MCP_SOFFICE_PROFILE_TEMPLATE", target))
+        self.assertEqual(
+            (target / "user" / "registrymodifications.xcu").read_text(), "<x/>")
+        # The copy is the conversion's own: writing to it leaves the template
+        # alone, which is what keeps concurrent conversions independent.
+        (target / "user" / "lock").write_text("held")
+        self.assertFalse((template / "user" / "lock").exists())
+
+
 class TestSubsetDeckBytes(unittest.TestCase):
     def test_keeps_only_requested_slides_in_order(self):
         from pptx import Presentation
