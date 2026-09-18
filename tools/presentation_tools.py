@@ -17,6 +17,89 @@ logger = get_logger("tools.presentation")
 OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
+def _attach_instructions(presentations, pres_id, payload, source):
+    """Load a template's .md sidecar onto the deck that was just created.
+
+    Runs in the same call as the template load, so the agent gets the
+    template and the rules for using it in one step and cannot start
+    building without knowing the rules exist. Never raises and never fails
+    the load: the deck is the deliverable, the instructions are an
+    enhancement, and a template with no sidecar is the ordinary case rather
+    than an error.
+    """
+    import template_instructions
+
+    try:
+        doc = template_instructions.load(payload, source=source)
+    except template_instructions.InstructionsError as e:
+        logger.warning("template_instructions_rejected presentation_id=%s "
+                       "source=%s error=%s", short_id(pres_id), source, e)
+        return {"loaded": False, "reason": str(e),
+                "note": "The deck was created; only its instructions sidecar "
+                        "was skipped. Continue with get_design_guidance."}
+    except Exception as e:
+        logger.warning("template_instructions_failed presentation_id=%s "
+                       "source=%s reason=%s error=%s", short_id(pres_id),
+                       source, type(e).__name__, e)
+        return {"loaded": False, "reason": f"Could not read the template's "
+                                           f"instructions ({e})."}
+
+    if doc is None:
+        return {"loaded": False, "reason": "no_instructions_supplied",
+                "note": "This template came with no instructions document. "
+                        "Use get_design_guidance and the template's own "
+                        "slides as your guide."}
+
+    presentations.set_instructions(pres_id, doc)
+    logger.info("template_instructions_attached presentation_id=%s source=%s "
+                "sections=%d", short_id(pres_id), source, len(doc["sections"]))
+    return template_instructions.summary(doc)
+
+
+def _read_sidecar(path):
+    """Read an instructions file from disk -> (text, error message).
+
+    Bounded before the read, not after: the cap exists to keep a stray large
+    file out of this process, and decode_payload can only enforce it once the
+    bytes are already in memory. Returns an error message rather than raising
+    for the same reason the rest of this path does not raise — a bad sidecar
+    must not cost the caller the deck it just loaded.
+    """
+    import template_instructions
+
+    limit = template_instructions.max_bytes()
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(limit + 1)
+    except OSError as e:
+        logger.warning("template_instructions_unreadable path=%s error=%s",
+                       path, e)
+        return None, f"The instructions file beside the template could not be read ({e})."
+    if len(raw) > limit:
+        logger.warning("template_instructions_oversize path=%s limit_bytes=%d",
+                       path, limit)
+        return None, (f"The instructions file beside the template is over this "
+                      f"server's {limit // 1024} KB limit. Template "
+                      f"instructions are meant to be a page or two of rules.")
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        logger.warning("template_instructions_not_utf8 path=%s", path)
+        return None, ("The instructions file beside the template is not UTF-8 "
+                      "text. Save the sidecar as a UTF-8 markdown (.md) file.")
+
+
+def _sidecar_path(template_path):
+    """The instructions file beside a template on disk: deck.pptx ->
+    deck.md, falling back to deck.pptx.md."""
+    candidates = [os.path.splitext(template_path)[0] + ".md",
+                  template_path + ".md"]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _visual_qa_gate(presentations, pres_id):
     """Optional export gate (VISUAL_QA_EXPORT_GATE=true).
 
@@ -221,13 +304,28 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         logger.info("template_loaded source=path path=%s presentation_id=%s "
                     "slides=%d layouts=%d", template_path, short_id(id),
                     len(pres.slides), len(pres.slide_layouts))
-        return {
+        # A template on disk carries its instructions beside it; look for the
+        # sidecar here rather than making the agent know it might exist.
+        sidecar = _sidecar_path(template_path)
+        payload, read_error = _read_sidecar(sidecar) if sidecar else (None, None)
+        result = {
             "presentation_id": id,
             "message": f"Created new presentation from template '{template_path}' with ID: {id}",
             "template_path": template_path,
             "slide_count": len(pres.slides),
             "layout_count": len(pres.slide_layouts)
         }
+        if read_error:
+            result["template_instructions"] = {
+                "loaded": False, "reason": read_error,
+                "note": "The deck was created; only its instructions sidecar "
+                        "was skipped. Continue with get_design_guidance."}
+        else:
+            result["template_instructions"] = _attach_instructions(
+                presentations, id, payload, source="sidecar_file")
+        if sidecar:
+            result["template_instructions"]["path"] = sidecar
+        return result
 
     @app.tool(
         annotations=ToolAnnotations(
@@ -363,7 +461,9 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             title="Create Presentation from Template Content",
         ),
     )
-    def create_presentation_from_template_content(template_content: str) -> Dict:
+    def create_presentation_from_template_content(
+            template_content: str,
+            instructions_content: Optional[str] = None) -> Dict:
         """Create a new presentation from an uploaded .pptx template file.
 
         A PowerPoint 97-2003 (.ppt) file is accepted too and converted to
@@ -373,9 +473,19 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         data: URI or a base64-encoded string (in DIAL Quick Apps, pass the template file as
         file:data::files/{bucket}/{path} and it is resolved automatically).
 
+        instructions_content: optional — the template's own build
+        instructions, a markdown (.md) file stored beside the template and
+        passed the same way (file:data::files/{bucket}/{path}). Pass it
+        whenever the template has one: it carries the rules for this specific
+        template (which slide to use for what, the accent colour, what the
+        footer must say) that no generic guidance can know. If the file does
+        not exist, omit this argument — the template loads exactly as before.
+
         The template's theme, layouts, masters and branding are preserved.
         Returns a presentation_id that must be passed to all subsequent tool
-        calls for this deck.
+        calls for this deck, and, when instructions were supplied, their
+        section list — read them with get_template_instructions before
+        planning the deck.
         """
         import base64
         import binascii
@@ -441,6 +551,8 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             "slide_count": len(pres.slides),
             "layout_count": len(pres.slide_layouts)
         }
+        result["template_instructions"] = _attach_instructions(
+            presentations, id, instructions_content, source="upload")
         if converted_from:
             result["converted_from"] = converted_from
             result["conversion_note"] = (

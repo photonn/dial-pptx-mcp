@@ -134,6 +134,33 @@ class PresentationStore(MutableMapping):
             entry = self._items.get(pres_id)
             return bool(entry and entry["needs_inspection"])
 
+    def set_instructions(self, pres_id, doc):
+        """Attach the template's own instruction document to a deck.
+
+        It is held here rather than passed around because it is per-deck and
+        must outlive the call that loaded it: the agent reads it section by
+        section as it builds (see template_instructions), and a long build is
+        exactly the case where it will need re-reading. It expires and is
+        evicted with the presentation it belongs to.
+        """
+        with self._lock:
+            entry = self._items.get(pres_id)
+            if entry:
+                entry["instructions"] = doc
+
+    def get_instructions(self, pres_id):
+        """Reading a deck's instructions counts as using the deck: an agent
+        re-reading a section mid-build is as much activity as an edit, and
+        letting the TTL expire under it would drop a presentation its client
+        is still working on."""
+        with self._lock:
+            self._purge()
+            entry = self._items.get(pres_id)
+            if entry is None:
+                return None
+            entry["last_used"] = time.monotonic()
+            return entry.get("instructions")
+
     def lock_for(self, pres_id):
         """Per-presentation lock, or a throwaway lock for unknown/missing IDs
         (the tool will then return its normal not-found error)."""

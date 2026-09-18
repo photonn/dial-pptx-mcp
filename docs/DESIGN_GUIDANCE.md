@@ -34,6 +34,12 @@ In this mode your design decisions are mostly *selection*, not invention:
   `render_slide_previews` together tell you what slides you have to work with.
   Plan the deck against those, not against an ideal deck you then force the
   template to imitate.
+- **Check whether the template brought its own rules.** The response that
+  created the deck carries a `template_instructions` field. When it says the
+  instructions loaded, read them with `get_template_instructions` before
+  planning and re-read the relevant section before each slide — they are the
+  template author's rules for this specific template and they win over
+  anything in this document.
 
 **Scratch mode — no template supplied.** Now you own every visual decision, and
 the rest of this document applies in full.

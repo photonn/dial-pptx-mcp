@@ -18,7 +18,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations` — python-pptx has no API for any of these |
 | Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
 | Validation | none | `validate_presentation`: package, relationship, geometry, chart, table and placeholder-text checks, folded into export |
-| Design | — | `get_design_guidance` (deck design as a document the agent reads), `render_slide_previews` (see the template before building on it) and `render_deck_summary_card` (show the finished deck as one image) |
+| Design | — | `get_design_guidance` (deck design as a document the agent reads), `get_template_instructions` (the template author's own rules, shipped as a `.md` beside the template instead of in the system prompt), `render_slide_previews` (see the template before building on it) and `render_deck_summary_card` (show the finished deck as one image) |
 | Charts | one type, one axis per chart | `add_combo_chart` (mixed series types, secondary value axis) and `format_chart_series` (colour, labels, trendlines) |
 | Output | `.pptx` | `.pptx`, `.pdf`, or both; PowerPoint 97-2003 `.ppt` accepted as input |
 | Deployment | — | Dockerfile (non-root, HTTP defaults) + generic Kubernetes example |
@@ -42,6 +42,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `DIAL_PUBLIC_URL` | no | — | Extra host(s) DIAL file links may carry besides `DIAL_CORE_URL` (comma-separated URLs or hostnames). Needed when the server reaches Core in-cluster but the orchestrator holds public `https://chat.example.com/api/files/...` links. The bytes are always fetched from `DIAL_CORE_URL` — only the path is taken from the link |
 | `DIAL_IMAGE_MAX_MB` | no | `20` | Largest image `add_image_from_dial_url` will download and embed. An unparsable value falls back to the default |
 | `PPT_MCP_MAX_ICONS` | no | `100` | Rendered icons held in memory for `add_icon_to_slide`, LRU-evicted (they expire on `PPT_MCP_STATE_TTL_SECONDS` like presentations) |
+| `TEMPLATE_INSTRUCTIONS_MAX_KB` | no | `128` | Largest template instructions sidecar the server will accept beside a template. The document is a page or two of rules for using that template, not a style manual. An unparsable value falls back to the default |
 | `SVG_ICON_MAX_KB` | no | `64` | Largest SVG source `render_svg_icon` will rasterize. An icon is a handful of paths; the limit is what stops traced artwork arriving as an "icon". An unparsable value falls back to the default |
 | `PPT_MCP_STATE_TTL_SECONDS` | no | `3600` | Idle time before an in-memory presentation expires |
 | `PPT_MCP_STATE_MAX_PRESENTATIONS` | no | `50` | Max concurrently held presentations (LRU eviction) |
@@ -109,6 +110,7 @@ Register the deployed server as an MCP tool set in your Quick App manifest:
 - `propagate_types_to_choice` makes the exported `.pptx` attachment visible to the end user in DIAL Chat (tool-call results are hidden by default).
 - **Deploy the server under the DIAL host** (behind DIAL Core routing) for per-user storage. Quick Apps attaches the end user's `Authorization: Bearer` only to MCP servers whose URL starts with the DIAL host — with it, the default `auto` mode uploads every export to that user's own bucket. For a server at an external URL, Quick Apps sends no user credentials (it deliberately refuses to forward `api-key`/`authorization` as custom headers), so `auto` falls back to the server's `DIAL_API_KEY` and exports land in the server's single bucket; set `DIAL_AUTH_MODE=caller` if you'd rather exports fail loudly than fall back.
 - **Template input**: the orchestrating agent passes the template to `create_presentation_from_template_content` as `file:data::files/{bucket}/{path}` — Quick Apps' file preprocessing resolves that reference to a data: URI before this server receives it (base64 via `file:base64::` also accepted). Note Quick Apps' default 10 MiB file-loading limit (`features.file_loading.size_limit`) if your templates are large.
+- **Template instructions**: a template may ship with a markdown sidecar holding its own build rules — which slide is the section divider, the accent colour, the footer text. Pass it in the same call, as `instructions_content=file:data::files/{bucket}/{path}`; the server parses it, attaches it to the deck and returns its section list, and `get_template_instructions(presentation_id, section?)` serves it back on demand. Omit the argument when the template has no sidecar. See [Template instructions](#template-instructions).
 - **Deck output**: `export_presentation` uploads to DIAL file storage and returns the `files/{bucket}/{path}` URL; the tool description instructs the agent to include it in its final answer.
 
 ## Images (orchestrator-generated)
@@ -229,6 +231,26 @@ Empty placeholders are deliberately **not** reported: PowerPoint draws their pro
 
 Its first section is the one that matters most here: this server's default case is a corporate template, so the right move is to **inherit** the user's design and duplicate their slides, not to invent a palette over the top of their brand.
 
+### Template instructions
+
+`get_design_guidance` is the same document for every deck. What it cannot carry is the part that differs per template: which of *this* template's slides is the section divider, which colour is the accent, what the footer must say, which slides must never be touched. Putting that in the orchestrator's system prompt works for one template and stops scaling at ten — every template's rules are then resident in every conversation, whichever template is actually in use.
+
+So the rules travel with the template. Store a markdown file beside the `.pptx` and pass it to the tool that loads the template:
+
+| Loader | How the sidecar is found |
+|---|---|
+| `create_presentation_from_template_content(template_content, instructions_content?)` | Passed explicitly, the same way as the template (`file:data::files/{bucket}/{path}`, a data: URI, base64, or the markdown inline) |
+| `create_presentation_from_template(template_path)` | Looked up automatically beside the template on disk: `deck.pptx` → `deck.md`, falling back to `deck.pptx.md` |
+
+The load returns a `template_instructions` object — the section list and character count, not the document itself — and `get_template_instructions(presentation_id, section?)` serves it whole or one `## Title` section at a time, from the deck's own entry in the store.
+
+**A missing sidecar is the ordinary case, not an error.** No `instructions_content`, an unresolved `file:data::` reference, an empty file or a broken one: the template loads exactly as before and the response says why nothing was attached. The deck is the deliverable; the instructions are an enhancement.
+
+Two things to know about the document itself:
+
+- **Give it `## Title` headings.** Section retrieval is what makes re-reading cheap, and re-reading is the point: on a long build the first read scrolls out of the model's context long before the last slide is done, so the system prompt should tell the agent to re-read the relevant section before each slide rather than trust its memory of it. Numbered headings (`## 1. Slides`) work too. A document with no headings is served whole.
+- **It is capped at `TEMPLATE_INSTRUCTIONS_MAX_KB` (default 128 KB) and must be UTF-8 text.** It comes out of a user bucket rather than shipping with the server, so it is served under a note telling the agent it is deck styling guidance and not a change to how it uses its tools.
+
 ### Slide previews
 
 `render_slide_previews(presentation_id, slides?, describe?, columns?)` renders the deck into labelled contact sheets, uploads them to DIAL storage (so a person can look at them), and — since the agent cannot see an image — has the vision model describe what each slide is structurally suited to. Use it right after opening a template: layout names and indices cannot tell you which of eight near-identical layouts holds the three-card row. Registered only where LibreOffice is present.
@@ -321,7 +343,10 @@ Nothing forces the orchestrator to inspect: with the export gate off, `export_pr
 
 ```text
 Before planning the deck, call get_design_guidance. If the user supplied a
-template, call render_slide_previews to see its slides, and build by
+template, pass its .md sidecar as instructions_content when you load it and
+read the result with get_template_instructions; re-read the relevant section
+before you build each slide, since those rules win over the general guidance.
+Call render_slide_previews to see its slides, and build by
 duplicating the template slides that fit your content (duplicate_slide)
 rather than adding bare ones.
 After you finish building each slide, call visual_inspect_slides with that
