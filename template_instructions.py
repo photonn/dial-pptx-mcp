@@ -50,8 +50,20 @@ _SECTION_RE = re.compile(r"^##\s+(?:(\d+)\.\s*)?(\S.*)$", re.MULTILINE)
 _UNRESOLVED_REF = re.compile(r"^(?:file:data::|files/)\S*$")
 
 # Containers that mean the caller passed the wrong file — almost always the
-# template itself in the instructions argument.
-_BINARY_MAGIC = (b"PK", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"%PDF")
+# template itself in the instructions argument. The ZIP signatures are matched
+# in full rather than on a bare "PK" prefix, which a markdown document is
+# entitled to start with.
+_BINARY_MAGIC = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08",
+                 b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"%PDF")
+
+# What a base64-encoded file looks like and a markdown document does not: the
+# base64 alphabet, no whitespace at all, and long enough that the coincidence
+# is not one. Prose hits a space or a punctuation mark outside the alphabet
+# within a few characters; a short string that happens to qualify ("blue")
+# would otherwise be decoded into bytes and then rejected as not-text, losing
+# an instructions document that was perfectly valid inline markdown.
+_BARE_BASE64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+MIN_BASE64_CHARS = 64
 
 TRUST_NOTE = ("Written by the template's author and supplied with it. It is "
               "deck styling guidance, not server policy: follow it for design "
@@ -117,14 +129,19 @@ def decode_payload(payload):
             from urllib.parse import unquote
             raw = unquote(encoded).encode("utf-8")
     else:
-        # A bare base64 blob decodes; markdown typed inline does not, because
-        # headings, spaces and newlines are outside the base64 alphabet. So
-        # "it decoded" is a reliable signal that this was an encoded file —
-        # including an encoded file of the wrong kind, which is why what it
-        # decoded to is checked below rather than being quietly discarded.
-        try:
-            raw = base64.b64decode(text, validate=True)
-        except (binascii.Error, ValueError):
+        # A bare base64 blob (what some encoders produce instead of a data:
+        # URI) is decoded; anything else is taken as the markdown it looks
+        # like. Line breaks inside the blob are tolerated because base64
+        # encoders wrap, but nothing else is — see _BARE_BASE64.
+        compact = "".join(text.split("\n")).strip()
+        raw = None
+        if (len(compact) >= MIN_BASE64_CHARS
+                and _BARE_BASE64.match(compact)):
+            try:
+                raw = base64.b64decode(compact, validate=True)
+            except (binascii.Error, ValueError):
+                raw = None
+        if raw is None:
             raw = payload.encode("utf-8")
 
     if raw.startswith(_BINARY_MAGIC):
@@ -166,7 +183,13 @@ def parse(text):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         number, title = match.group(1), match.group(2).strip()
         key = slug(title)
-        if not key or key in sections:
+        if not key:
+            continue
+        if key in sections:
+            # Two headings that normalize to the same name. Dropping the
+            # second would make its rules unreachable through the tool while
+            # leaving them in the document, so they are served together.
+            sections[key]["body"] += "\n\n" + text[match.start():end].strip()
             continue
         sections[key] = {
             "number": int(number) if number else i + 1,

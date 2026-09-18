@@ -89,6 +89,23 @@ class DecodeTests(unittest.TestCase):
             template_instructions.decode_payload("x" * 4096)
         self.assertIn("limit", str(ctx.exception))
 
+    def test_short_inline_markdown_is_not_mistaken_for_base64(self):
+        # "blue" is valid base64 that decodes to bytes; it is also a perfectly
+        # good (if terse) instruction.
+        for literal in ("blue", "TWFu", "Use the deck"):
+            self.assertEqual(template_instructions.decode_payload(literal),
+                             literal)
+
+    def test_markdown_starting_with_pk_is_not_binary(self):
+        doc = "PKI certificates are the subject of slide 4."
+        self.assertEqual(template_instructions.decode_payload(doc), doc)
+
+    def test_wrapped_base64_is_decoded(self):
+        encoded = b64(DOC)
+        wrapped = "\n".join(encoded[i:i + 76]
+                             for i in range(0, len(encoded), 76))
+        self.assertEqual(template_instructions.decode_payload(wrapped), DOC)
+
     def test_invalid_cap_falls_back(self):
         os.environ["TEMPLATE_INSTRUCTIONS_MAX_KB"] = "lots"
         self.assertEqual(template_instructions.max_bytes(),
@@ -125,6 +142,15 @@ class ParseTests(unittest.TestCase):
         self.assertIn("keep it blue",
                       template_instructions.select(doc, None)["instructions"])
         self.assertIn("error", template_instructions.select(doc, "colours"))
+
+
+class DuplicateSectionTests(unittest.TestCase):
+    def test_same_heading_twice_is_served_together(self):
+        doc = template_instructions.parse(
+            "## Colours\n\nAccent is red.\n\n## Colours\n\nNever green.\n")
+        picked = template_instructions.select(doc, "colours")
+        self.assertIn("Accent is red", picked["instructions"])
+        self.assertIn("Never green", picked["instructions"])
 
 
 class LoadAndServeTests(unittest.TestCase):
@@ -189,6 +215,40 @@ class LoadAndServeTests(unittest.TestCase):
             Presentation().save(path)
             result = self.create_from_path(path)
             self.assertFalse(result["template_instructions"]["loaded"])
+
+    def test_oversized_sidecar_on_disk_is_refused_not_read(self):
+        os.environ["TEMPLATE_INSTRUCTIONS_MAX_KB"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, "deck.pptx")
+                Presentation().save(path)
+                Path(tmp, "deck.md").write_text("x" * 8192, encoding="utf-8")
+                result = self.create_from_path(path)
+                info = result["template_instructions"]
+                self.assertIn("presentation_id", result)
+                self.assertFalse(info["loaded"])
+                self.assertIn("KB limit", info["reason"])
+        finally:
+            os.environ.pop("TEMPLATE_INSTRUCTIONS_MAX_KB", None)
+
+    def test_non_utf8_sidecar_on_disk_keeps_the_deck(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "deck.pptx")
+            Presentation().save(path)
+            Path(tmp, "deck.md").write_bytes(b"\xff\xfe not utf-8")
+            result = self.create_from_path(path)
+            self.assertIn("presentation_id", result)
+            info = result["template_instructions"]
+            self.assertFalse(info["loaded"])
+            self.assertIn("UTF-8", info["reason"])
+
+    def test_reading_a_section_keeps_the_deck_alive(self):
+        result = self.create(b64(template_bytes()), b64(DOC))
+        pid = result["presentation_id"]
+        before = self.store._items[pid]["last_used"]
+        self.store._items[pid]["last_used"] = before - 30
+        self.get(pid, "colours")
+        self.assertGreater(self.store._items[pid]["last_used"], before - 30)
 
     def test_instructions_die_with_the_deck(self):
         result = self.create(b64(template_bytes()), b64(DOC))

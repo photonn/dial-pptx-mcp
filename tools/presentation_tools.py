@@ -56,6 +56,39 @@ def _attach_instructions(presentations, pres_id, payload, source):
     return template_instructions.summary(doc)
 
 
+def _read_sidecar(path):
+    """Read an instructions file from disk -> (text, error message).
+
+    Bounded before the read, not after: the cap exists to keep a stray large
+    file out of this process, and decode_payload can only enforce it once the
+    bytes are already in memory. Returns an error message rather than raising
+    for the same reason the rest of this path does not raise — a bad sidecar
+    must not cost the caller the deck it just loaded.
+    """
+    import template_instructions
+
+    limit = template_instructions.max_bytes()
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read(limit + 1)
+    except OSError as e:
+        logger.warning("template_instructions_unreadable path=%s error=%s",
+                       path, e)
+        return None, f"The instructions file beside the template could not be read ({e})."
+    if len(raw) > limit:
+        logger.warning("template_instructions_oversize path=%s limit_bytes=%d",
+                       path, limit)
+        return None, (f"The instructions file beside the template is over this "
+                      f"server's {limit // 1024} KB limit. Template "
+                      f"instructions are meant to be a page or two of rules.")
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        logger.warning("template_instructions_not_utf8 path=%s", path)
+        return None, ("The instructions file beside the template is not UTF-8 "
+                      "text. Save the sidecar as a UTF-8 markdown (.md) file.")
+
+
 def _sidecar_path(template_path):
     """The instructions file beside a template on disk: deck.pptx ->
     deck.md, falling back to deck.pptx.md."""
@@ -274,14 +307,7 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
         # A template on disk carries its instructions beside it; look for the
         # sidecar here rather than making the agent know it might exist.
         sidecar = _sidecar_path(template_path)
-        payload = None
-        if sidecar:
-            try:
-                with open(sidecar, encoding="utf-8") as fh:
-                    payload = fh.read()
-            except OSError as e:
-                logger.warning("template_instructions_unreadable path=%s "
-                               "error=%s", sidecar, e)
+        payload, read_error = _read_sidecar(sidecar) if sidecar else (None, None)
         result = {
             "presentation_id": id,
             "message": f"Created new presentation from template '{template_path}' with ID: {id}",
@@ -289,8 +315,14 @@ def register_presentation_tools(app: FastMCP, presentations: Dict, get_current_p
             "slide_count": len(pres.slides),
             "layout_count": len(pres.slide_layouts)
         }
-        result["template_instructions"] = _attach_instructions(
-            presentations, id, payload, source="sidecar_file")
+        if read_error:
+            result["template_instructions"] = {
+                "loaded": False, "reason": read_error,
+                "note": "The deck was created; only its instructions sidecar "
+                        "was skipped. Continue with get_design_guidance."}
+        else:
+            result["template_instructions"] = _attach_instructions(
+                presentations, id, payload, source="sidecar_file")
         if sidecar:
             result["template_instructions"]["path"] = sidecar
         return result

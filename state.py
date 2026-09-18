@@ -149,9 +149,17 @@ class PresentationStore(MutableMapping):
                 entry["instructions"] = doc
 
     def get_instructions(self, pres_id):
+        """Reading a deck's instructions counts as using the deck: an agent
+        re-reading a section mid-build is as much activity as an edit, and
+        letting the TTL expire under it would drop a presentation its client
+        is still working on."""
         with self._lock:
+            self._purge()
             entry = self._items.get(pres_id)
-            return entry.get("instructions") if entry else None
+            if entry is None:
+                return None
+            entry["last_used"] = time.monotonic()
+            return entry.get("instructions")
 
     def lock_for(self, pres_id):
         """Per-presentation lock, or a throwaway lock for unknown/missing IDs

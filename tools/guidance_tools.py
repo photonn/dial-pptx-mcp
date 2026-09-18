@@ -30,8 +30,9 @@ logger = get_logger("tools.guidance")
 
 UNKNOWN_ID = (
     "Unknown or expired presentation_id. Pass the presentation_id returned "
-    "by create_presentation, create_presentation_from_template, or "
-    "open_presentation"
+    "when the deck was created: by create_presentation, "
+    "create_presentation_from_template, "
+    "create_presentation_from_template_content or open_presentation"
 )
 
 GUIDANCE_PATH = (Path(__file__).resolve().parent.parent / "docs"
