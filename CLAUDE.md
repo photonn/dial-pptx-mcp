@@ -80,6 +80,20 @@ mtime-cached, split on its own `## N. Title` headings) and is served whole or by
 caller is building. Its premise is that template mode is the default: inherit the user's design, don't invent one over
 it. Keep it consistent with the tool names it references.
 
+**Template instructions (`template_instructions.py`, the second tool in `tools/guidance_tools.py`).** `DESIGN_GUIDANCE.md`
+and `ICON_GUIDANCE.md` ship with the server and are the same for every deck; what they cannot carry is which of *this*
+template's slides is the section divider. That knowledge belongs to the template author, so it travels with the
+template as a markdown sidecar rather than living in the orchestrator's system prompt, where N templates cost N
+documents in every conversation. Both template loaders take it in the **same call** that loads the template
+(`instructions_content` on the upload path — resolved by Quick Apps exactly like `template_content`; an auto-detected
+`deck.md` beside `deck.pptx` on the path one) and `_attach_instructions` parks the parsed document on the deck's own
+store entry, so it expires with the deck and `get_template_instructions(presentation_id, section?)` can serve it back
+section by section — which is the point: on a long build the first read scrolls out of the model's context, and only a
+scoped re-read is cheap enough to repeat per slide. **A missing or broken sidecar never fails the load**: the deck is
+the deliverable and every failure path returns a reason beside a working `presentation_id`. Unlike the two server-side
+documents this one arrives from a user bucket, so it is size-capped (`TEMPLATE_INSTRUCTIONS_MAX_KB`), required to be
+UTF-8 text, and served with a note framing it as deck styling guidance rather than instructions about tool use.
+
 **Previews (`previews.py`, `tools/preview_tools.py`).** Two composers with opposite audiences, sharing one renderer.
 `render_slide_previews` builds contact sheets for choosing a template slide: the agent cannot look at an image, so the
 vision-model description is the part it can act on and the uploaded sheet is for the person, which is why an upload

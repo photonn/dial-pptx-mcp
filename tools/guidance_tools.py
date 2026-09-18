@@ -10,6 +10,12 @@ without the server having to prepend a few thousand tokens to every session.
 The document is the single source of truth — it is read from disk, not
 duplicated here — and it is split on its own "## N. Title" headings so an agent
 can ask for just the part it needs mid-build.
+
+`get_template_instructions` is the per-deck half of the same idea: the generic
+document cannot know which slide of *this* template is the section divider, so
+that knowledge travels with the template as a markdown sidecar, is loaded by
+the tool that loads the template, and is served from the deck's own entry in
+the store (see template_instructions).
 """
 import re
 from pathlib import Path
@@ -21,6 +27,12 @@ from mcp.types import ToolAnnotations
 from logging_utils import get_logger
 
 logger = get_logger("tools.guidance")
+
+UNKNOWN_ID = (
+    "Unknown or expired presentation_id. Pass the presentation_id returned "
+    "by create_presentation, create_presentation_from_template, or "
+    "open_presentation"
+)
 
 GUIDANCE_PATH = (Path(__file__).resolve().parent.parent / "docs"
                  / "DESIGN_GUIDANCE.md")
@@ -121,3 +133,41 @@ def register_guidance_tools(app: FastMCP, presentations):
                          f"sections: "
                          f"{', '.join(item['section'] for item in available)}.",
                 "sections": available}
+
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="Get This Template's Instructions",
+            readOnlyHint=True,
+        ),
+    )
+    def get_template_instructions(presentation_id: str,
+                                  section: Optional[str] = None) -> Dict:
+        """The build instructions that came with this deck's template.
+
+        Where get_design_guidance is the same for every deck, this is the
+        template author's own rules for the template in front of you: which
+        slide to duplicate for what, the accent colour, the footer text, the
+        slides that must not be touched. It exists only when the template was
+        loaded with an instructions document beside it — the loading tool
+        says so in its "template_instructions" field.
+
+        Read it before planning the deck, and re-read the section you need
+        before building a slide: a long build will push the first read out of
+        your context, and these rules override the generic guidance wherever
+        the two disagree.
+
+        section: omit for the whole document, or name one from the "sections"
+        list that every response carries.
+        """
+        import template_instructions
+
+        if presentation_id not in presentations:
+            return {"error": UNKNOWN_ID}
+
+        doc = presentations.get_instructions(presentation_id)
+        if doc is None:
+            return {"error": "This deck's template came with no instructions "
+                             "document. Use get_design_guidance and follow "
+                             "the template's own example slides.",
+                    "loaded": False}
+        return template_instructions.select(doc, section)
