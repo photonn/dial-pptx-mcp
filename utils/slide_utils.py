@@ -19,6 +19,7 @@ import re
 
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.opc.package import _Relationship  # noqa: PLC2701 - no public equivalent
+from pptx.opc.packuri import PackURI
 from pptx.oxml.ns import qn
 
 from logging_utils import get_logger
@@ -79,18 +80,55 @@ def check_index(pres, index, what="slide_index"):
 
 # ---- Delete / reorder ----
 
+# Slide partnames python-pptx expects to find, and a prefix nothing else in
+# the package uses, for the collision-free first pass of a renumber.
+_SLIDE_PARTNAME = "/ppt/slides/slide%d.xml"
+_SLIDE_PARKED_PARTNAME = "/ppt/slides/_renumber%d.xml"
+
+
+def _renumber_slide_parts(pres):
+    """Restore the dense slide1..slideN partname sequence after a deletion.
+
+    python-pptx names a new slide part from the *length* of <p:sldIdLst>
+    (`PresentationPart._next_slide_partname`) rather than from the free-slot
+    search `package.next_partname` does. Deleting a slide shortens that list
+    without renaming the parts above it, so the next `add_slide` computes a
+    partname a live part already holds. Two parts then answer to one partname,
+    the saved zip carries two entries under that name, and the result is a
+    deck LibreOffice refuses to load and PowerPoint offers to repair — with
+    nothing wrong with any individual part, so it is invisible to every check
+    that reads the package as a mapping.
+
+    Renaming happens in two passes because a dense target sequence overlaps
+    the current one: every part is parked on a name no other part can hold
+    before any final name is assigned.
+    """
+    parts = [slide.part for slide in pres.slides]
+    if [str(part.partname) for part in parts] == \
+            [_SLIDE_PARTNAME % (i + 1) for i in range(len(parts))]:
+        return
+    for position, part in enumerate(parts):
+        part.partname = PackURI(_SLIDE_PARKED_PARTNAME % (position + 1))
+    for position, part in enumerate(parts):
+        part.partname = PackURI(_SLIDE_PARTNAME % (position + 1))
+    logger.debug("slide_parts_renumbered slides=%d", len(parts))
+
+
 def delete_slide(pres, index):
     """Remove the slide at `index` from the presentation.
 
     Drops the presentation's relationship to the slide part as well as its
     <p:sldId> entry, so the part is garbage-collected on save instead of
-    lingering as an orphan in the package.
+    lingering as an orphan in the package, then renumbers the slide parts
+    that remain — see `_renumber_slide_parts` for why leaving a gap corrupts
+    the next slide this deck adds.
     """
     sld_id_lst = _sld_id_lst(pres)
     sld_id = list(sld_id_lst)[index]
     rId = sld_id.rId
     sld_id_lst.remove(sld_id)
     pres.part.drop_rel(rId)
+    _renumber_slide_parts(pres)
 
 
 def move_slide(pres, index, new_index):

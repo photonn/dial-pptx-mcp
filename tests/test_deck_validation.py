@@ -7,6 +7,7 @@ the "clean deck" case: it must produce no errors.
 """
 import io
 import unittest
+import zipfile
 
 from pptx import Presentation
 from pptx.oxml.ns import qn
@@ -269,6 +270,28 @@ class TestPackageChecks(unittest.TestCase):
         report = deck_validation._Report()
         deck_validation._check_package(b"not a zip file at all", report)
         self.assertIn("package_unreadable", {p["code"] for p in report.problems})
+
+    def test_two_parts_under_one_name_is_an_error(self):
+        """The defect a part-by-part reading of the package cannot see.
+
+        Every entry here is individually valid; what is wrong is that there
+        are two of them under one name, which is what a slide deletion
+        followed by an add produced before delete_slide renumbered the parts.
+        """
+        buffer = io.BytesIO()
+        blank_deck(2).save(buffer)
+        source = zipfile.ZipFile(io.BytesIO(buffer.getvalue()))
+        doubled = io.BytesIO()
+        with zipfile.ZipFile(doubled, "w") as out:
+            for name in source.namelist():
+                out.writestr(name, source.read(name))
+            out.writestr("ppt/slides/slide2.xml",
+                         source.read("ppt/slides/slide1.xml"))
+        report = deck_validation._Report()
+        deck_validation._check_package(doubled.getvalue(), report)
+        problems = {p["code"] for p in report.problems}
+        self.assertIn("duplicate_part", problems)
+        self.assertNotIn("content_type_undeclared", problems)
 
     def test_dangling_relationship_is_an_error(self):
         pres = blank_deck()
