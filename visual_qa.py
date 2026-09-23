@@ -658,11 +658,25 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
     return verdict
 
 
+# Only these make a slide fail. "minor" findings are reported back but never
+# repaired: a stateless reviewer always finds another minor nit, and chasing
+# them is what turned one-round fixes into ten-round loops. An issue with no
+# (or an unknown) severity counts as blocking, so nothing slips through.
+NON_BLOCKING_SEVERITIES = {"minor"}
+
+
+def blocking_issues(issues):
+    return [i for i in issues
+            if str(i.get("severity", "")).lower() not in NON_BLOCKING_SEVERITIES]
+
+
 def inspect_and_repair(pres, slides: list = None, focus: str = None,
                        max_iterations: int = None) -> dict:
     """Inspect/repair loop: inspect the selected slides; on failure, repair
     them in place via LLM-planned whitelisted operations (visual_fix.py) and
-    inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 10) inspections.
+    inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 3) inspections.
+    Stops early once a repair round fails to reduce the blocking-issue
+    count: the geometry ops either fixed it or they cannot.
 
     slides: 1-based slide numbers to work on; None means the whole deck.
     Repairs are confined to the reviewed slides — issues reported against
@@ -678,7 +692,7 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     llm = VisionLLM()
     max_slides = None if slides else _slide_cap()
     if max_iterations is None:
-        max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "10"))
+        max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "3"))
     max_iterations = max(1, max_iterations)
 
     # Constant for the whole loop: repairs never change which fonts the deck
@@ -699,26 +713,37 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         verdict = llm.review(deck_images,
                              review_prompt(False, focus, slides, risky_fonts))
         verdict["slides_reviewed"] = slides or len(deck_images)
-        issues = [i for i in verdict.get("issues", [])
-                  if not slides or i.get("slide") in slides]
+        in_scope = [i for i in verdict.get("issues", [])
+                    if not slides or i.get("slide") in slides]
+        issues = blocking_issues(in_scope)
         logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
-                    "duration_ms=%d", iteration, max_iterations,
-                    len(deck_images), verdict.get("passed"), len(issues),
+                    "blocking=%d duration_ms=%d", iteration, max_iterations,
+                    len(deck_images), verdict.get("passed"), len(in_scope),
+                    len(issues),
                     int((time.monotonic() - round_started) * 1000))
         if logger.isEnabledFor(logging.DEBUG):
-            for issue in issues:
+            for issue in in_scope:
                 logger.debug("qa_issue iteration=%d slide=%s severity=%s "
                              "description=%s", iteration, issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if verdict.get("passed") is True or (slides and not issues
+        if verdict.get("passed") is True or (not issues
                                              and verdict.get("passed") is not None):
-            # Passing verdict, or no issue left on the slides in scope.
+            # Passing verdict, or nothing blocking left in scope. The pass
+            # rule is ours, not the model's: its own "passed" flag is not
+            # always consistent with the severities it reports.
             logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
                         "duration_ms=%d", iteration, len(repair_rounds),
                         int((time.monotonic() - loop_started) * 1000))
             return {"passed": True, "iterations": iteration,
                     "repair_rounds": repair_rounds}
+        if repair_rounds and len(issues) >= repair_rounds[-1]["issues_found"]:
+            # The last repair round applied operations but left as many
+            # blocking issues as before: more rounds of the same geometry
+            # ops will not converge. Hand it back instead of looping.
+            logger.warning("qa_loop_stop reason=no_improvement iteration=%d "
+                           "blocking=%d", iteration, len(issues))
+            break
         if iteration == max_iterations or not issues:
             # Out of budget, or nothing actionable (e.g. unparseable review)
             logger.warning("qa_loop_stop reason=%s iteration=%d",

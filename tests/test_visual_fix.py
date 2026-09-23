@@ -526,20 +526,81 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         self.assertEqual(outcome["iterations"], 2)
         self.assertEqual(outcome["repair_rounds"][0]["operations_applied"], 1)
 
+    @staticmethod
+    def _failing(n):
+        return {"passed": False,
+                "issues": [{"slide": 1, "description": f"x{i}"}
+                           for i in range(n)]}
+
     def test_gives_up_after_max_iterations(self):
-        failing = {"passed": False,
-                   "issues": [{"slide": 1, "description": "x"}]}
+        # Every round improves (3 -> 2 -> 1 blocking issues), so only the
+        # budget stops it.
         plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                  "size_pt": 20}]
         os.environ["VISUAL_QA_MAX_ITERATIONS"] = "3"
         try:
-            outcome, calls = self._run([failing], [plan])
+            outcome, calls = self._run(
+                [self._failing(3), self._failing(2), self._failing(1)], [plan])
         finally:
             os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
         self.assertFalse(outcome["passed"])
         self.assertEqual(calls["review"], 3)
         self.assertEqual(len(outcome["repair_rounds"]), 2)
         self.assertTrue(outcome["issues"])
+
+    def test_stops_when_a_repair_round_does_not_reduce_issues(self):
+        plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                 "size_pt": 20}]
+        os.environ["VISUAL_QA_MAX_ITERATIONS"] = "10"
+        try:
+            outcome, calls = self._run([self._failing(1)], [plan])
+        finally:
+            os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
+        self.assertFalse(outcome["passed"])
+        self.assertEqual(calls["review"], 2)  # not 10
+        self.assertEqual(calls["plan"], 1)
+
+    def test_minor_issues_pass_without_repair(self):
+        # The model says passed=false, but everything it found is minor.
+        verdict = {"passed": False,
+                   "issues": [{"slide": 1, "severity": "minor",
+                               "description": "slightly uneven gap"}]}
+        outcome, calls = self._run([verdict], [[]])
+        self.assertTrue(outcome["passed"])
+        self.assertEqual(calls["plan"], 0)
+
+    def test_only_blocking_issues_are_sent_to_the_planner(self):
+        seen = {}
+        verdicts = [
+            {"passed": False, "issues": [
+                {"slide": 1, "severity": "major", "description": "overflow"},
+                {"slide": 1, "severity": "minor", "description": "nit"}]},
+            {"passed": True, "issues": []},
+        ]
+
+        def fake_plan(llm, issues, pres, images, image_slides=None):
+            seen["issues"] = issues
+            return [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                     "size_pt": 20}]
+
+        with patch.object(visual_qa, "_render_deck",
+                          return_value=[b"\x89PNG-fake"]), \
+             patch.object(visual_qa.VisionLLM, "review",
+                          lambda s, i, p, timeout=None:
+                          dict(verdicts.pop(0))), \
+             patch.object(visual_fix, "plan_repairs", fake_plan):
+            outcome = visual_qa.inspect_and_repair(make_deck())
+        self.assertTrue(outcome["passed"])
+        self.assertEqual([i["severity"] for i in seen["issues"]], ["major"])
+
+    def test_default_budget_is_three_rounds(self):
+        plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                 "size_pt": 20}]
+        os.environ.pop("VISUAL_QA_MAX_ITERATIONS", None)
+        outcome, calls = self._run(
+            [self._failing(5), self._failing(4), self._failing(3),
+             self._failing(2)], [plan])
+        self.assertEqual(calls["review"], 3)
 
     def test_stops_early_when_no_repairs_apply(self):
         failing = {"passed": False,

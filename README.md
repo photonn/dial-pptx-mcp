@@ -56,7 +56,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
 | `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per whole-deck inspection (an explicit `slides` list is never capped) |
 | `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely. It governs slide inspection only — `render_svg_icon` still reviews an icon whenever a vision model is configured |
-| `VISUAL_QA_MAX_ITERATIONS` | no | `10` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
+| `VISUAL_QA_MAX_ITERATIONS` | no | `3` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
 | `VISUAL_QA_EXPORT_GATE` | no | `false` | `true` also runs a whole-deck inspect-repair loop inside export/save and refuses unverified decks |
 | `VISUAL_QA_ON_UNRESOLVED` | no | `report` | Export gate only: `report` fails the export with the issue list, `export_as_is` ships the deck |
 | `VISUAL_QA_ON_ERROR` | no | `block` | Export gate only: `allow` exports when inspection itself cannot run |
@@ -292,7 +292,7 @@ When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools
 
 `slides` is a list of 1-based slide numbers; omit it to work on the whole deck. Issue slide numbers are always absolute deck positions, even when only a subset was rendered, and a scoped repair call never touches a slide outside `slides`. Because LibreOffice converts the whole deck either way, a narrow selection saves the vision call and the repair round, not the render.
 
-`max_iterations` defaults to `VISUAL_QA_MAX_ITERATIONS` (10) and can be lowered per call for a quick single-slide pass. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
+`max_iterations` defaults to `VISUAL_QA_MAX_ITERATIONS` (3) and can be lowered per call for a quick single-slide pass. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
 
 ### Export
 
