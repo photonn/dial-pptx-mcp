@@ -593,6 +593,38 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         self.assertTrue(outcome["passed"])
         self.assertEqual([i["severity"] for i in seen["issues"]], ["major"])
 
+    def test_later_rounds_re_review_only_repaired_slides(self):
+        """Round 2 renders only what round 1 changed; a blocking issue on a
+        slide no operation reached is carried as unresolved, not re-inspected."""
+        pres = make_deck()
+        while len(pres.slides) < 3:
+            pres.slides.add_slide(pres.slide_layouts[6]).shapes.add_textbox(
+                0, 0, 100, 100).text_frame.text = "extra"
+        scopes = []
+        verdicts = [
+            {"passed": False, "issues": [
+                {"slide": 1, "severity": "major", "description": "overflow"},
+                {"slide": 3, "severity": "major", "description": "overlap"}]},
+            {"passed": True, "issues": []},
+        ]
+
+        def fake_render(p, max_slides=None, slides=None):
+            scopes.append(slides)
+            return [b"\x89PNG-fake"] * (len(slides) if slides else 3)
+
+        plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                 "size_pt": 20}]
+        with patch.object(visual_qa, "_render_deck", fake_render), \
+             patch.object(visual_qa.VisionLLM, "review",
+                          lambda s, i, p, timeout=None:
+                          dict(verdicts.pop(0))), \
+             patch.object(visual_fix, "plan_repairs",
+                          lambda *a, **k: plan):
+            outcome = visual_qa.inspect_and_repair(pres)
+        self.assertEqual(scopes, [None, [1]])
+        self.assertFalse(outcome["passed"])
+        self.assertEqual([i["slide"] for i in outcome["issues"]], [3])
+
     def test_default_budget_is_three_rounds(self):
         plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                  "size_pt": 20}]

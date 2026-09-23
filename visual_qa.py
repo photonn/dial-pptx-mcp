@@ -704,22 +704,33 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     logger.info("qa_loop_start scope=%s slides_cap=%s max_iterations=%d",
                 ",".join(map(str, slides)) if slides else "deck",
                 max_slides, max_iterations)
+    # Round 1 reviews everything in scope. Later rounds re-render and
+    # re-review only the slides the previous round actually changed — an
+    # untouched slide cannot have changed, and re-reviewing it just invites
+    # a stateless reviewer to find a fresh nit on a slide that already
+    # passed. Blocking issues on slides no operation reached are carried
+    # forward as unresolved instead of being re-inspected.
+    review_scope = slides
+    carried = []
+    in_scope = []
     for iteration in range(1, max_iterations + 1):
         round_started = time.monotonic()
-        deck_images = _render_deck(pres, max_slides, slides)
+        deck_images = _render_deck(
+            pres, max_slides if review_scope is None else None, review_scope)
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
-        image_slides = slides or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images,
-                             review_prompt(False, focus, slides, risky_fonts))
-        verdict["slides_reviewed"] = slides or len(deck_images)
+        image_slides = review_scope or list(range(1, len(deck_images) + 1))
+        verdict = llm.review(deck_images, review_prompt(
+            False, focus, review_scope, risky_fonts))
+        verdict["slides_reviewed"] = review_scope or len(deck_images)
         in_scope = [i for i in verdict.get("issues", [])
-                    if not slides or i.get("slide") in slides]
+                    if not review_scope or i.get("slide") in review_scope]
         issues = blocking_issues(in_scope)
+        blocking_total = len(issues) + len(carried)
         logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
-                    "blocking=%d duration_ms=%d", iteration, max_iterations,
-                    len(deck_images), verdict.get("passed"), len(in_scope),
-                    len(issues),
+                    "blocking=%d carried=%d duration_ms=%d", iteration,
+                    max_iterations, len(deck_images), verdict.get("passed"),
+                    len(in_scope), len(issues), len(carried),
                     int((time.monotonic() - round_started) * 1000))
         if logger.isEnabledFor(logging.DEBUG):
             for issue in in_scope:
@@ -727,8 +738,8 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                              "description=%s", iteration, issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if verdict.get("passed") is True or (not issues
-                                             and verdict.get("passed") is not None):
+        if not carried and (verdict.get("passed") is True or (
+                not issues and verdict.get("passed") is not None)):
             # Passing verdict, or nothing blocking left in scope. The pass
             # rule is ours, not the model's: its own "passed" flag is not
             # always consistent with the severities it reports.
@@ -737,15 +748,16 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                         int((time.monotonic() - loop_started) * 1000))
             return {"passed": True, "iterations": iteration,
                     "repair_rounds": repair_rounds}
-        if repair_rounds and len(issues) >= repair_rounds[-1]["issues_found"]:
+        if repair_rounds and blocking_total >= repair_rounds[-1]["issues_found"]:
             # The last repair round applied operations but left as many
             # blocking issues as before: more rounds of the same geometry
             # ops will not converge. Hand it back instead of looping.
             logger.warning("qa_loop_stop reason=no_improvement iteration=%d "
-                           "blocking=%d", iteration, len(issues))
+                           "blocking=%d", iteration, blocking_total)
             break
         if iteration == max_iterations or not issues:
-            # Out of budget, or nothing actionable (e.g. unparseable review)
+            # Out of budget, or nothing actionable (e.g. unparseable review,
+            # or only carried issues left)
             logger.warning("qa_loop_stop reason=%s iteration=%d",
                            "budget_exhausted" if iteration == max_iterations
                            else "no_actionable_issues", iteration)
@@ -755,7 +767,7 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
         round_report = {
             "iteration": iteration,
-            "issues_found": len(issues),
+            "issues_found": blocking_total,
             "operations_applied": len(result["applied"]),
             "operations_skipped": len(result["skipped"]),
         }
@@ -772,9 +784,11 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                            "operations_planned=%d operations_skipped=%d",
                            iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
+        touched = sorted({op["slide"] for op in result["applied"]})
+        carried += [i for i in issues if i.get("slide") not in touched]
+        review_scope = touched
 
-    remaining = [i for i in verdict.get("issues", [])
-                 if not slides or i.get("slide") in slides]
+    remaining = in_scope + carried
     out = {"passed": False,
            "iterations": len(repair_rounds) + 1,
            "repair_rounds": repair_rounds,
