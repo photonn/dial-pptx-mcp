@@ -349,26 +349,26 @@ before you build each slide, since those rules win over the general guidance.
 Call render_slide_previews to see its slides, and build by
 duplicating the template slides that fit your content (duplicate_slide)
 rather than adding bare ones.
-After you finish building each slide, call visual_inspect_slides with that
-slide's number. If it reports issues, call visual_repair_slides for the same
-slide and continue only once it passes or you have fixed the content yourself.
-Before export_presentation, call validate_presentation and fix any errors it
-reports, then call visual_inspect_slides once with no slides argument to check
-the deck as a whole. If the export response says
+Build every slide first. Then call validate_presentation and fix any errors
+it reports, then call visual_repair_slides once with no slides argument. It
+inspects the whole deck, repairs only the slides that fail and re-checks only
+those — do not call visual_inspect_slides before it, that just reviews the
+same slides twice. If it returns "passed": false, fix the listed slides'
+content yourself and call visual_repair_slides again with just those slides. If the export response says
 "visual_qa": "unverified", say so in your answer rather than presenting the
 deck as checked.
 After exporting, call render_deck_summary_card and attach the image it returns
 alongside the .pptx, so the user can see the finished deck in the chat.
 ```
 
-Per-slide checks are the cheap path — one render plus one vision call each, caught while the slide is still fresh in context. Keep the whole-deck pass for the end: it is the only thing that marks the deck `passed`, and it catches cross-slide inconsistencies a single-slide review cannot see.
+One whole-deck `visual_repair_slides` at the end is the cheap path — one render and one vision call for every slide at once, then follow-up rounds on the failing slides only. It is also the only thing that marks the deck `passed`, and it catches cross-slide inconsistencies a single-slide review cannot see. Per-slide calls cost an orchestrator turn plus a render and a vision round trip each; keep them for the first slide you build from a new layout, where catching a mistake before you copy it pays off.
 
 ### Sizing the QA work (orchestrator budget, timeouts, pod resources)
 
 | Concern | Guidance |
 |---|---|
 | Orchestrator iterations (Quick Apps `max_iterations`, default 15) | Now includes the QA calls the agent makes. Roughly 2 calls per slide plus create/export, plus one inspect or repair per slide: a 20-slide deck needs **~65**, so set `max_iterations` to **80** (100 if slides carry charts/tables/images) |
-| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | A single-slide inspect ≈ 15–30s (render + review); a single-slide repair round adds another LLM call. A whole-deck `visual_repair_slides` on 20 slides is the expensive case at ≈ 40–90s per round — budget `max_iterations × 90s` for it, or keep calls slide-scoped and 300s is plenty |
+| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | Rendering is ~1–2s for a few slides and ~4s for a 10-slide deck (only the layouts in use are rendered, however many the template carries); the rest is vision-model latency. A whole-deck `visual_repair_slides` is one review call for every slide, then one plan + one re-review per repair round on the failing slides only, at most `VISUAL_QA_MAX_ITERATIONS` (3) rounds — 300s is plenty unless your vision model is slow |
 | Slides actually reviewed | `VISION_LLM_MAX_SLIDES` (default 15) caps whole-deck calls only; an explicit `slides` list is never truncated |
 | Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails every QA call |
 

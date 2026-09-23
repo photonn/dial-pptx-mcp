@@ -259,12 +259,14 @@ Design quality comes out of the loop, not out of the first attempt:
 3. **Build one slide** — `duplicate_slide` the right template slide, then fill
    it (`manage_text`, `populate_placeholder`, `add_chart`,
    `add_image_from_dial_url`).
-4. **Look at it** with `visual_inspect_slides(slides=[n])`. Inspecting the one
-   slide you just built is cheap and precise, and catching a layout mistake now
-   is much cheaper than discovering it in all twelve copies later.
+4. **Check the first slide of each new layout** with
+   `visual_repair_slides(slides=[n])` — catching a layout mistake before you
+   copy it into twelve slides is worth one extra call. Don't check the others
+   one by one; step 6 covers them in a single pass.
 5. **Repeat** for the rest of the deck.
 6. **Validate the whole deck**: `validate_presentation` for structure, then
-   `visual_repair_slides` for appearance.
+   one `visual_repair_slides` call with no `slides` argument for appearance.
+   It inspects first — don't call `visual_inspect_slides` before it.
 7. **Read the text back** with `extract_presentation_text` — check for missing
    sections, duplicated content, and template filler nobody replaced.
 8. **Export** with `export_presentation` and give the user the file URL.
