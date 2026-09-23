@@ -522,16 +522,49 @@ def fail_open_on_error() -> bool:
     return os.environ.get("VISUAL_QA_ON_ERROR", "block").lower() == "allow"
 
 
-def _subset_deck_bytes(pres, slides):
-    """Serialize a copy of `pres` containing only the given 1-based slides,
-    kept in their original deck order (not the order of `slides`).
+def _prune_unused_layouts(pres):
+    """Remove every slide layout, and every slide master, that no slide in
+    `pres` uses. Mutates `pres` — only ever call it on a throwaway copy.
 
-    LibreOffice always converts the whole file it is given, so trimming here
-    — before the file ever reaches soffice — is what actually cuts render
-    time for a slide-scoped inspect/repair call, instead of converting the
-    full deck and discarding the unwanted pages afterward. Operates on a
-    freshly reopened copy so the caller's live `pres` (and its bound
-    `shapes`/spTree state, see CLAUDE.md) is never touched.
+    A corporate template can carry hundreds of layouts across several
+    masters, and LibreOffice imports every one of them as a master page
+    before it renders a single slide. That import, not the slides, is what
+    dominates conversion time: a 1-slide render of a 291-layout template
+    takes ~15s, the same slide with its one layout ~1s. The rendered pixels
+    are identical, because a slide only ever draws its own layout and master.
+    """
+    if not len(pres.slides):
+        return
+    used_layouts = {s.slide_layout.part.partname for s in pres.slides}
+    used_masters = {s.slide_layout.slide_master.part.partname
+                    for s in pres.slides}
+    for master in list(pres.slide_masters):
+        layout_ids = master._element.get_or_add_sldLayoutIdLst()
+        for layout_id in list(layout_ids):
+            rid = layout_id.rId
+            if master.part.related_part(rid).partname not in used_layouts:
+                # Remove the reference first: drop_rel only drops a
+                # relationship nothing in the XML still points at.
+                layout_ids.remove(layout_id)
+                master.part.drop_rel(rid)
+    master_ids = pres.part._element.get_or_add_sldMasterIdLst()
+    for master_id in list(master_ids):
+        rid = master_id.rId
+        if pres.part.related_part(rid).partname not in used_masters:
+            master_ids.remove(master_id)
+            pres.part.drop_rel(rid)
+
+
+def _subset_deck_bytes(pres, slides=None):
+    """Serialize a render-only copy of `pres`: just the given 1-based slides
+    (None keeps them all), kept in their original deck order (not the order
+    of `slides`), with every unused layout and master stripped.
+
+    LibreOffice always converts the whole file it is given — slides, layouts
+    and masters alike — so trimming here, before the file ever reaches
+    soffice, is what actually cuts render time. Operates on a freshly
+    reopened copy so the caller's live `pres` (and its bound `shapes`/spTree
+    state, see CLAUDE.md) is never touched.
     """
     import io
     from pptx import Presentation
@@ -541,27 +574,48 @@ def _subset_deck_bytes(pres, slides):
     pres.save(buf)
     buf.seek(0)
     subset = Presentation(buf)
-    keep = set(slides)
-    for index in range(len(subset.slides) - 1, -1, -1):
-        if (index + 1) not in keep:
-            delete_slide(subset, index)
+    if slides:
+        keep = set(slides)
+        for index in range(len(subset.slides) - 1, -1, -1):
+            if (index + 1) not in keep:
+                delete_slide(subset, index)
+    try:
+        _prune_unused_layouts(subset)
+    except Exception as e:  # never let an optimization break a render
+        logger.warning("layout_prune_failed error=%s falling_back=unpruned",
+                       flatten(str(e)))
+        buf.seek(0)
+        return _subset_deck_bytes_unpruned(buf.getvalue(), slides)
+    out = io.BytesIO()
+    subset.save(out)
+    return out.getvalue()
+
+
+def _subset_deck_bytes_unpruned(data, slides):
+    """The pre-pruning behaviour, kept as the fallback path."""
+    import io
+    from pptx import Presentation
+    from utils import delete_slide
+
+    subset = Presentation(io.BytesIO(data))
+    if slides:
+        keep = set(slides)
+        for index in range(len(subset.slides) - 1, -1, -1):
+            if (index + 1) not in keep:
+                delete_slide(subset, index)
     out = io.BytesIO()
     subset.save(out)
     return out.getvalue()
 
 
 def _render_deck(pres, max_slides=None, slides=None):
-    import io
-    if slides:
-        # slides is always pre-sorted (normalize_slides / the repair loop's
-        # own image_slides), so the subset deck's page order already matches
-        # what callers expect back — no slides= filtering needed downstream.
-        return render_pptx_bytes_to_pngs(_subset_deck_bytes(pres, slides),
-                                         max_slides=max_slides)
-    buf = io.BytesIO()
-    pres.save(buf)
-    return render_pptx_bytes_to_pngs(buf.getvalue(), max_slides=max_slides,
-                                     slides=slides)
+    # slides is always pre-sorted (normalize_slides / the repair loop's own
+    # image_slides), so the subset deck's page order already matches what
+    # callers expect back — no slides= filtering needed downstream. A
+    # whole-deck render goes through the same pruned copy, so it too skips
+    # the template's unused layouts.
+    return render_pptx_bytes_to_pngs(_subset_deck_bytes(pres, slides),
+                                     max_slides=None if slides else max_slides)
 
 
 def _slide_cap():
