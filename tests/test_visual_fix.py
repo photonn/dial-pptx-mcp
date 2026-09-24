@@ -20,6 +20,9 @@ ENV = {
     "VISION_LLM_ENDPOINT": "https://example.invalid/responses",
     "VISION_LLM_API_KEY": "k",
     "VISION_LLM_MODEL": "m",
+    # The deck-level story review is its own LLM call; tests that script the
+    # visual verdicts turn it off (tests.test_deck_review covers it).
+    "VISUAL_QA_COHERENCE": "false",
 }
 
 
@@ -463,7 +466,7 @@ class TestInspectAndRepairLoop(unittest.TestCase):
             calls["review"] += 1
             return dict(v)
 
-        def fake_plan(llm, issues, pres, images, image_slides=None):
+        def fake_plan(llm, issues, pres, images, image_slides=None, **_):
             p = plans[min(calls["plan"], len(plans) - 1)]
             calls["plan"] += 1
             return p
@@ -593,7 +596,7 @@ class TestInspectAndRepairLoop(unittest.TestCase):
             {"passed": True, "issues": []},
         ]
 
-        def fake_plan(llm, issues, pres, images, image_slides=None):
+        def fake_plan(llm, issues, pres, images, image_slides=None, **_):
             seen["issues"] = issues
             return [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                      "size_pt": 20}]

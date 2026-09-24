@@ -265,10 +265,16 @@ Design quality comes out of the loop, not out of the first attempt:
    one by one; step 6 covers them in a single pass.
 5. **Repeat** for the rest of the deck.
 6. **Validate the whole deck**: `validate_presentation` for structure, then
-   one `visual_repair_slides` call with no `slides` argument for appearance.
-   It inspects first — don't call `visual_inspect_slides` before it.
-7. **Read the text back** with `extract_presentation_text` — check for missing
-   sections, duplicated content, and template filler nobody replaced.
+   one `visual_repair_slides` call with no `slides` argument and no `focus`.
+   It reviews every slide and the deck's story — agenda against sections,
+   content on the wrong slide, blank slides, contradictions — and fixes what
+   it can. Don't call `visual_inspect_slides` before it.
+7. **Finish what only you can**: every `action_required` entry is content the
+   repair engine will not invent (a blank slide, a missing chart). Build it,
+   then `visual_repair_slides(slides=[...])` on just those slides. To remove
+   or relocate a single element use `manage_shape` (find its index with
+   `get_slide_info`); prefer editing an element in place to deleting and
+   re-adding it.
 8. **Export** with `export_presentation` and give the user the file URL.
 9. **Show your work**: `render_deck_summary_card` tiles the finished deck into
    one image. Attach it next to the file so the user can see what they got

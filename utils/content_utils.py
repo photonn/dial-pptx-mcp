@@ -66,6 +66,20 @@ def get_slide_info(slide, slide_index: int) -> Dict:
                 "width": shape.width,
                 "height": shape.height
             }
+            # Inches and a text preview, so an agent can tell which element
+            # to address with manage_shape without a second lookup.
+            for key in ("left", "top", "width", "height"):
+                if shape_info[key] is not None:
+                    shape_info[f"{key}_in"] = round(shape_info[key] / 914400, 2)
+            if shape.is_placeholder:
+                shape_info["placeholder_idx"] = shape.placeholder_format.idx
+            if shape.has_text_frame and shape.text_frame.text.strip():
+                text = shape.text_frame.text
+                shape_info["text"] = text[:200] + ("…" if len(text) > 200 else "")
+            elif getattr(shape, "has_table", False):
+                shape_info["table"] = f"{len(shape.table.rows)}x{len(shape.table.columns)}"
+            elif getattr(shape, "has_chart", False):
+                shape_info["chart"] = True
             shapes.append(shape_info)
         
         return {

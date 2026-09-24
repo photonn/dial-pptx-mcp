@@ -15,7 +15,9 @@ The LLM endpoint speaks the OpenAI Responses API with image input
   https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview
 - VISION_LLM_API_KEY    sent as both api-key (Azure) and Authorization: Bearer
 - VISION_LLM_MODEL      model / Azure deployment name (must accept images)
-- VISION_LLM_MAX_SLIDES cap on slides sent per inspection (default 15)
+- VISION_LLM_BATCH_SLIDES slides per vision request (default 6); a deck is
+  reviewed in batches, VISION_LLM_MAX_PARALLEL (default 4) at a time
+- VISION_LLM_MAX_SLIDES cap on slides one whole-deck review covers (default 60)
 - SOFFICE_PATH          LibreOffice binary if not "soffice" on PATH
 """
 import base64
@@ -32,6 +34,7 @@ from pathlib import Path
 
 import httpx
 
+import deck_review
 import fonts
 from logging_utils import get_logger, flatten
 
@@ -224,13 +227,33 @@ def normalize_slides(pres, slides):
 # ---- Vision LLM client (OpenAI Responses API shape, Azure-compatible) ----
 
 REVIEW_PROMPT = """You are a meticulous presentation QA reviewer. You are shown \
-rendered slide images of a PowerPoint deck generated from a corporate template{ref_note}.
+rendered slide images of a PowerPoint deck generated from a corporate template{ref_note}. \
+The deck will be presented to an audience as it is: anything you miss ships.
 
-Check every slide for:
-1. Template/brand fidelity: consistent colors, fonts, logo placement, and layout \
-usage matching the deck's own master style{ref_clause}.
-2. Text placement and overlap, ANYWHERE text appears — not just in text boxes. \
-Judge the rendered pixels, not what the text probably says:
+Judge the rendered pixels. Beside the images you get an inventory of what each \
+slide's file actually contains (title, text of every element, charts, tables); \
+use it to catch content that exists but cannot be seen, and content that does \
+not belong on its slide. Check EVERY slide for EVERY item below.
+
+1. Empty, incomplete or wrong content.
+   - A content slide that shows only its title, or whose body area is blank or \
+nearly blank, is critical — it will be presented as a blank slide. (Title, \
+section divider, statement, quote and closing slides are meant to be sparse.)
+   - Content that does not match the slide title — e.g. cards, figures or text \
+about a different topic, the typical result of content placed on the wrong \
+slide — is critical. Say what the content is about and which title it would fit.
+   - Placeholder prompts ("Click to add title/text"), sample or template text, \
+"Lorem ipsum", "TBD", "XXX", "[insert …]", empty picture or chart frames.
+   - Large unexplained empty regions, or content crammed into one corner while \
+the rest of the slide stays empty.
+2. Hidden, covered or stray content.
+   - Text from the inventory that is not visible: covered by a shape, card or \
+picture, placed off the slide, same colour as its background, or shrunk to \
+nothing. Text showing through behind or between cards (letters peeking out \
+from under shapes) is critical.
+   - Elements stacked on top of each other, duplicated elements, leftover \
+shapes or empty boxes with no purpose, template decoration covered by content.
+3. Text placement and overlap, ANYWHERE text appears — not just in text boxes:
    - Text overflowing, clipped, or spilling outside its container or the slide edge.
    - Text overlapping other text, or sitting on top of shapes, images or lines in \
 a way that makes either hard to read.
@@ -240,32 +263,78 @@ other, a legend covering the plot area or running off the chart, an axis title \
 squeezed or rotated into illegibility, series labels detached from what they label.
    - Tables: cell text wrapping into an unreadable stack, clipped by the cell or \
 row height, columns too narrow for their content, headers not aligned with their \
-columns, a table extending past the slide.
+columns, a table extending past the slide, empty rows or columns.
    - Diagrams, SmartArt and grouped shapes: labels wider than the node or box that \
 holds them, text escaping a connector or arrow, node labels overlapping neighbouring \
 nodes or connectors.
-   - Text that is too small to read at presentation size, or too low-contrast \
-against what is behind it.
+   - Footnotes and source lines clipped at the slide bottom, running into \
+content, or wrapping over the template's footer.
+4. Text size and legibility.
+   - Text too small to read at presentation size (body text below roughly 10pt, \
+chart and table text below roughly 8pt), or too low-contrast against what is \
+behind it (light on light, dark on dark, text over a busy photo).
    - Text sized badly for the space it occupies: a heading or body block set so \
 small that its box is mostly empty, or comparable elements on one slide set at \
 visibly different sizes for no reason. Text should fill its container \
 comfortably without crowding it or its neighbours — report both the starved and \
 the overstuffed cases, but do not ask for larger text where growing it would \
 eat the slide's white space.
-3. Other visible errors: elements off the slide edge, placeholder text left \
-unfilled (e.g. "Click to add title"), broken or empty charts/tables/images, \
-inconsistent alignment or spacing between comparable elements.
+   - Awkward line breaks: a single word orphaned on its own line in a title or \
+card, a word or number split across lines.
+5. Characters and formatting.
+   - Missing-glyph boxes (□, ▯, ?), mojibake ("â€™", "Ã©"), literal markup or \
+escapes ("**bold**", "\\\\n", "&amp;", "<b>").
+   - Doubled bullets (a typed "•" or "-" after an automatic bullet), empty bullet \
+lines, a leading blank line, numbering that restarts or skips.
+   - Obvious typos, doubled words, sentences cut off mid-word.
+6. Charts and data visuals.
+   - A chart squashed into a strip, its plot area too small to read, or empty \
+(no bars, lines or slices).
+   - Default or meaningless labels: "Chart Title", "Series 1", "Metric", \
+"Category 1", an axis title that says nothing.
+   - A chart whose form does not fit its data (one bar, a pie with one slice, \
+a single point on a line), or whose scale hides the differences it is meant to show.
+   - KPI or stat cards whose numbers are cut, misaligned or visually unrelated \
+to their labels.
+7. Pictures and icons.
+   - Distorted aspect ratio, pixelated or blurry, awkwardly cropped (cut-off \
+heads or text), a broken-image placeholder.
+   - Icons inconsistent in style, colour or size across a row, or unreadable \
+against their background.
+8. Layout, alignment and consistency.
+   - Elements off the slide edge, crossing the template's header rule, logo or \
+footer zone, or covering template artwork.
+   - Comparable elements (cards, columns, icons, timeline steps) misaligned, \
+unevenly spaced or of unequal size; an unbalanced composition.
+   - Title position, size or colour differing from the other slides of the \
+same layout.
+9. Template and brand fidelity: consistent colors, fonts, logo placement, and \
+layout usage matching the deck's own master style{ref_clause}; off-brand colours \
+or fonts; a missing, duplicated or distorted logo.
+
+Severity:
+- "critical": the slide would be presented wrong — blank or near-blank content \
+slide, content that belongs to another slide, hidden or covered content, \
+unreadable text, a broken or empty chart/table/image.
+- "major": a defect an audience would notice — clipped or overlapping text \
+(unreadable or overlapping text is at least major), placeholder text, \
+distorted images, misaligned comparable elements, default chart labels.
+- "minor": polish only.
 
 Report each problem separately, naming the element it affects (e.g. "chart on the \
-right: x-axis labels overlap"), and say in "suggested_fix" what change would resolve \
-it (resize, reposition, shorten the text, smaller font, wider column, hide the \
-legend).
+right: x-axis labels overlap", or the element's shape_index from the \
+inventory), and say in "suggested_fix" what change would resolve it (resize, \
+reposition, shorten the text, smaller font, wider column, hide the legend, \
+move element N to slide M, delete the covered text, bring to front). When the \
+fix needs content only the author can supply, say exactly what is missing.
 
 Respond with ONLY a JSON object, no markdown fence:
 {{"passed": true|false, "issues": [{{"slide": <1-based number>, "severity": \
-"critical"|"major"|"minor", "description": "...", "suggested_fix": "..."}}]}}
-Unreadable or overlapping text is at least a major issue. "passed" is true only \
-when there are no critical or major issues."""
+"critical"|"major"|"minor", "category": "empty"|"misplaced"|"hidden"|"overflow"|\
+"overlap"|"legibility"|"characters"|"chart"|"table"|"image"|"layout"|"brand", \
+"element": "...", "related_slides": [<other 1-based slides involved, if any>], \
+"description": "...", "suggested_fix": "..."}}]}}
+"passed" is true only when there are no critical or major issues."""
 
 
 class VisionLLMConfigError(VisualQAError):
@@ -344,7 +413,8 @@ class VisionLLM:
                 b64 = base64.b64encode(png).decode()
                 content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    "image_url": {"url": f"data:image/png;base64,{b64}",
+                                  "detail": "high"},
                 })
             return {"messages": [{"role": "user", "content": content}]}
         content = [{"type": "input_text", "text": prompt}]
@@ -353,6 +423,11 @@ class VisionLLM:
             content.append({
                 "type": "input_image",
                 "image_url": f"data:image/png;base64,{b64}",
+                # "auto" lets the endpoint downscale a multi-image request
+                # until small text, clipped glyphs and thin overlaps — most
+                # of what the reviewer is there to find — are no longer
+                # visible.
+                "detail": "high",
             })
         return {"model": self.model,
                 "input": [{"role": "user", "content": content}]}
@@ -610,7 +685,7 @@ def _subset_deck_bytes_unpruned(data, slides):
 
 def _render_deck(pres, max_slides=None, slides=None):
     # slides is always pre-sorted (normalize_slides / the repair loop's own
-    # image_slides), so the subset deck's page order already matches what
+    # review scope), so the subset deck's page order already matches what
     # callers expect back — no slides= filtering needed downstream. A
     # whole-deck render goes through the same pruned copy, so it too skips
     # the template's unused layouts.
@@ -618,43 +693,174 @@ def _render_deck(pres, max_slides=None, slides=None):
                                      max_slides=None if slides else max_slides)
 
 
+def _env_int(name, default, minimum=1):
+    try:
+        return max(minimum, int(os.environ.get(name, default)))
+    except ValueError:
+        logger.warning("config_invalid var=%s value=%s using=%s", name,
+                       os.environ.get(name), default)
+        return default
+
+
 def _slide_cap():
-    return int(os.environ.get("VISION_LLM_MAX_SLIDES", "15"))
+    """Most slides one whole-deck review covers. Slides beyond it are reported
+    back as not reviewed — never silently treated as passed."""
+    return _env_int("VISION_LLM_MAX_SLIDES", 60)
+
+
+def _batch_size():
+    """Slides per vision request. Fifteen images in one request is where the
+    reviewer started missing blank slides outright: each image gets a smaller
+    share of the model's attention (and of the endpoint's image budget)."""
+    return _env_int("VISION_LLM_BATCH_SLIDES", 6)
+
+
+def _max_parallel():
+    return _env_int("VISION_LLM_MAX_PARALLEL", 4)
+
+
+def _initial_scope(pres, slides):
+    """-> (review_scope, not_reviewed). review_scope is None for "the whole
+    deck, rendered as one" and a sorted list otherwise; not_reviewed lists
+    the slides a whole-deck review had to leave out because of the cap."""
+    if slides:
+        return slides, []
+    total, cap = len(pres.slides), _slide_cap()
+    if total <= cap:
+        return None, []
+    logger.warning("review_truncated slides=%d cap=%d "
+                   "hint=raise_VISION_LLM_MAX_SLIDES", total, cap)
+    return list(range(1, cap + 1)), list(range(cap + 1, total + 1))
+
+
+def _coherence_applies(pres, slides):
+    """The deck-level story review needs the whole deck — an agenda cannot be
+    checked against the two slides a scoped call names — and something to
+    cross-check."""
+    return (slides is None and len(pres.slides) >= 3
+            and deck_review.coherence_enabled())
+
+
+def _valid_issue(issue, allowed):
+    return isinstance(issue, dict) and issue.get("slide") in allowed
+
+
+def _review(llm, pres, images, image_slides, focus, risky_fonts,
+            reference_images=(), coherence=False):
+    """Review rendered slides in parallel batches, plus (optionally) the
+    deck-level coherence review, and merge the results.
+
+    Returns (visual, coherence_verdict): visual is {"passed", "issues",
+    "slides_reviewed"} with passed None when any batch answer could not be
+    parsed; coherence_verdict is None when not run or when it failed (a
+    failed story review degrades to the visual one, it does not fail QA).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # The inventory is built here, on the calling thread: the review threads
+    # only do HTTP and never touch python-pptx objects.
+    inventory = {o["slide"]: o
+                 for o in deck_review.slide_outline(pres, image_slides)}
+    outline = deck_review.slide_outline(pres) if coherence else None
+    size = _batch_size()
+    batches = [(images[i:i + size], image_slides[i:i + size])
+               for i in range(0, len(images), size)]
+    reference_images = list(reference_images)
+
+    def review_batch(batch):
+        batch_images, numbers = batch
+        prompt = review_prompt(
+            bool(reference_images), focus, numbers, risky_fonts,
+            inventory=[inventory[n] for n in numbers if n in inventory],
+            image_offset=len(reference_images))
+        return numbers, llm.review(reference_images + batch_images, prompt)
+
+    workers = max(1, min(_max_parallel(), len(batches) + bool(coherence)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        coherence_future = pool.submit(
+            llm.review, [], deck_review.coherence_prompt(outline)) \
+            if coherence else None
+        batch_results = list(pool.map(review_batch, batches))
+
+    issues, unparseable = [], None
+    for numbers, verdict in batch_results:
+        if verdict.get("passed") is None and unparseable is None:
+            unparseable = verdict
+        for issue in verdict.get("issues", []):
+            if _valid_issue(issue, numbers):
+                issue.setdefault("check", "visual")
+                issues.append(issue)
+            else:
+                logger.debug("review_issue_dropped slide=%s batch=%s",
+                             issue.get("slide") if isinstance(issue, dict)
+                             else "?", ",".join(map(str, numbers)))
+    visual = {"passed": None if unparseable else not blocking_issues(issues),
+              "issues": issues,
+              "slides_reviewed": list(image_slides)}
+    if unparseable:
+        for key in ("raw_review", "note"):
+            if key in unparseable:
+                visual[key] = unparseable[key]
+
+    coherence_verdict = None
+    if coherence_future is not None:
+        try:
+            coherence_verdict = coherence_future.result()
+            valid = range(1, len(pres.slides) + 1)
+            coherence_verdict["issues"] = [
+                dict(i, check="coherence")
+                for i in coherence_verdict.get("issues", [])
+                if _valid_issue(i, valid)]
+            logger.info("coherence_done slides=%d passed=%s issues=%d",
+                        len(pres.slides), coherence_verdict.get("passed"),
+                        len(coherence_verdict["issues"]))
+        except Exception as e:
+            logger.warning("coherence_failed error=%s", flatten(str(e)))
+            coherence_verdict = None
+    return visual, coherence_verdict
 
 
 def inspect_presentation(pres, reference_pres=None, focus: str = None,
                          slides: list = None) -> dict:
     """Render a python-pptx Presentation (and optional reference) and return
-    the vision reviewer's verdict.
+    the reviewers' verdict.
 
-    slides: 1-based slide numbers to review; None reviews the whole deck
-    (capped by VISION_LLM_MAX_SLIDES). Issue slide numbers in the verdict are
-    always absolute deck positions, not positions within the selection.
+    slides: 1-based slide numbers to review; None reviews the whole deck (up
+    to VISION_LLM_MAX_SLIDES, the rest reported in "slides_not_reviewed") and
+    also runs the deck-level coherence review. Issue slide numbers are always
+    absolute deck positions. "passed" is decided here from the severities —
+    never taken from the model's own flag.
     Raises VisualQAError on infrastructure failure (renderer/LLM).
     """
     llm = VisionLLM()
-    max_slides = None if slides else _slide_cap()
-
-    deck_images = _render_deck(pres, max_slides, slides)
-    ref_images = _render_deck(reference_pres, _slide_cap()) \
+    scope, not_reviewed = _initial_scope(pres, slides)
+    deck_images = _render_deck(pres, None, scope)
+    image_slides = scope or list(range(1, len(deck_images) + 1))
+    # One batch's worth of reference pages is enough to show the brand.
+    ref_images = _render_deck(reference_pres, None, None)[:_batch_size()] \
         if reference_pres is not None else []
 
-    prompt = review_prompt(bool(ref_images), focus, slides,
-                           fonts.unreliable_fonts_in(pres))
-    if ref_images:
-        prompt += (
-            f"\nImage order: images 1-{len(ref_images)} are the reference "
-            f"template; images {len(ref_images) + 1}-"
-            f"{len(ref_images) + len(deck_images)} are the deck under review. "
-            "Report issue slide numbers relative to the deck under review."
-        )
-    verdict = llm.review(ref_images + deck_images, prompt)
-    verdict["slides_reviewed"] = slides or len(deck_images)
+    visual, coherence = _review(
+        llm, pres, deck_images, image_slides, focus,
+        fonts.unreliable_fonts_in(pres), ref_images,
+        coherence=_coherence_applies(pres, slides))
+    issues = visual["issues"] + (coherence["issues"] if coherence else [])
+    verdict = {
+        "passed": None if visual["passed"] is None
+        else not blocking_issues(issues),
+        "issues": issues,
+        "slides_reviewed": len(image_slides),
+        "checks": ["visual"] + (["coherence"] if coherence else []),
+    }
+    if not_reviewed:
+        verdict["slides_not_reviewed"] = not_reviewed
+    for key in ("raw_review", "note"):
+        if key in visual:
+            verdict[key] = visual[key]
     logger.info("inspection_done slides=%d scope=%s reference=%s passed=%s "
                 "issues=%d", len(deck_images),
                 ",".join(map(str, slides)) if slides else "deck",
-                bool(ref_images), verdict.get("passed"),
-                len(verdict.get("issues", [])))
+                bool(ref_images), verdict["passed"], len(issues))
     return verdict
 
 
@@ -663,6 +869,8 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
 # them is what turned one-round fixes into ten-round loops. An issue with no
 # (or an unknown) severity counts as blocking, so nothing slips through.
 NON_BLOCKING_SEVERITIES = {"minor"}
+# Cap on minor findings echoed back: they are for the record, not for action.
+MAX_MINOR_REPORTED = 20
 
 
 def blocking_issues(issues):
@@ -672,25 +880,28 @@ def blocking_issues(issues):
 
 def inspect_and_repair(pres, slides: list = None, focus: str = None,
                        max_iterations: int = None) -> dict:
-    """Inspect/repair loop: inspect the selected slides; on failure, repair
-    them in place via LLM-planned whitelisted operations (visual_fix.py) and
-    inspect again, up to VISUAL_QA_MAX_ITERATIONS (default 3) inspections.
-    Stops early once a repair round fails to reduce the blocking-issue
-    count: the geometry ops either fixed it or they cannot.
+    """Inspect/repair loop: review the selected slides (and, for the whole
+    deck, the deck's story — see deck_review.py); on failure, repair in place
+    via LLM-planned whitelisted operations (visual_fix.py) and review again,
+    up to VISUAL_QA_MAX_ITERATIONS (default 3) reviews. Stops early once a
+    repair round fails to reduce the blocking-issue count: the operations
+    either fixed it or they cannot.
 
     slides: 1-based slide numbers to work on; None means the whole deck.
     Repairs are confined to the reviewed slides — issues reported against
     other slides are ignored, so a caller iterating slide by slide never has
     the model rewrite a slide it did not ask about.
 
-    Returns {"passed": bool, "iterations": n, "repair_rounds": [...],
-    "issues": [...]} — "issues" holds what remains when passed is False.
+    Returns {"passed", "iterations", "repair_rounds", "issues",
+    "minor_issues", "slides_reviewed", "checks"} plus "action_required" (what
+    only the deck's author can fix) and "slides_not_reviewed" when non-empty.
+    "passed" is our rule — no blocking issue left anywhere in scope — never
+    the model's own flag, which it happily sets beside a critical finding.
     Raises VisualQAError on infrastructure failure (renderer/LLM).
     """
     import visual_fix
 
     llm = VisionLLM()
-    max_slides = None if slides else _slide_cap()
     if max_iterations is None:
         max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "3"))
     # The budget counts inspections, so 1 would inspect and return without
@@ -702,60 +913,65 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     # Constant for the whole loop: repairs never change which fonts the deck
     # names, and re-scanning per round would only cost time.
     risky_fonts = fonts.unreliable_fonts_in(pres)
-    repair_rounds = []
-    verdict = {}
+    initial_scope, not_reviewed = _initial_scope(pres, slides)
+    use_coherence = _coherence_applies(pres, slides)
+    checks = ["visual"] + (["coherence"] if use_coherence else [])
+    repair_rounds, author_actions = [], []
+    visual = {}
     loop_started = time.monotonic()
-    logger.info("qa_loop_start scope=%s slides_cap=%s max_iterations=%d",
+    logger.info("qa_loop_start scope=%s coherence=%s max_iterations=%d",
                 ",".join(map(str, slides)) if slides else "deck",
-                max_slides, max_iterations)
+                use_coherence, max_iterations)
     # Round 1 reviews everything in scope. Later rounds re-render and
     # re-review only the slides the previous round actually changed — an
     # untouched slide cannot have changed, and re-reviewing it just invites
     # a stateless reviewer to find a fresh nit on a slide that already
-    # passed. Blocking issues on slides no operation reached are carried
-    # forward as unresolved instead of being re-inspected.
-    review_scope = slides
-    carried = []
-    in_scope = []
+    # passed. Blocking visual issues on slides no operation reached are
+    # carried forward as unresolved instead of being re-inspected. The
+    # coherence review is one cheap text call and re-runs every round:
+    # a move or an agenda rewrite changes the story on several slides.
+    review_scope = initial_scope
+    images_by_slide = {}
+    carried, found, reviewed = [], [], set()
     for iteration in range(1, max_iterations + 1):
         round_started = time.monotonic()
-        deck_images = _render_deck(
-            pres, max_slides if review_scope is None else None, review_scope)
+        deck_images = _render_deck(pres, None, review_scope)
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = review_scope or list(range(1, len(deck_images) + 1))
-        verdict = llm.review(deck_images, review_prompt(
-            False, focus, review_scope, risky_fonts))
-        verdict["slides_reviewed"] = review_scope or len(deck_images)
-        in_scope = [i for i in verdict.get("issues", [])
-                    if not review_scope or i.get("slide") in review_scope]
-        issues = blocking_issues(in_scope)
+        images_by_slide.update(zip(image_slides, deck_images))
+        reviewed.update(image_slides)
+        visual, coherence = _review(llm, pres, deck_images, image_slides,
+                                    focus, risky_fonts,
+                                    coherence=use_coherence)
+        in_scope = [i for i in visual["issues"]
+                    if not slides or i.get("slide") in slides]
+        found = in_scope + (coherence["issues"] if coherence else [])
+        issues = blocking_issues(found)
         blocking_total = len(issues) + len(carried)
-        logger.info("qa_round iteration=%d/%d slides=%d passed=%s issues=%d "
-                    "blocking=%d carried=%d duration_ms=%d", iteration,
-                    max_iterations, len(deck_images), verdict.get("passed"),
-                    len(in_scope), len(issues), len(carried),
+        logger.info("qa_round iteration=%d/%d slides=%d issues=%d blocking=%d "
+                    "carried=%d coherence_issues=%s duration_ms=%d", iteration,
+                    max_iterations, len(deck_images), len(found), len(issues),
+                    len(carried),
+                    len(coherence["issues"]) if coherence else "-",
                     int((time.monotonic() - round_started) * 1000))
         if logger.isEnabledFor(logging.DEBUG):
-            for issue in in_scope:
-                logger.debug("qa_issue iteration=%d slide=%s severity=%s "
-                             "description=%s", iteration, issue.get("slide"),
+            for issue in found:
+                logger.debug("qa_issue iteration=%d check=%s slide=%s "
+                             "severity=%s description=%s", iteration,
+                             issue.get("check"), issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if not carried and (verdict.get("passed") is True or (
-                not issues and verdict.get("passed") is not None)):
-            # Passing verdict, or nothing blocking left in scope. The pass
-            # rule is ours, not the model's: its own "passed" flag is not
-            # always consistent with the severities it reports.
+        if not carried and not issues and visual["passed"] is not None:
             logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
                         "duration_ms=%d", iteration, len(repair_rounds),
                         int((time.monotonic() - loop_started) * 1000))
-            return {"passed": True, "iterations": iteration,
-                    "repair_rounds": repair_rounds}
+            return _outcome(True, iteration, repair_rounds, [], found,
+                            reviewed, checks, not_reviewed, author_actions)
         if repair_rounds and blocking_total >= repair_rounds[-1]["issues_found"]:
             # The last repair round applied operations but left as many
-            # blocking issues as before: more rounds of the same geometry
-            # ops will not converge. Hand it back instead of looping.
+            # blocking issues as before: more rounds of the same operations
+            # will not converge. Hand it back instead of looping.
             logger.warning("qa_loop_stop reason=no_improvement iteration=%d "
                            "blocking=%d", iteration, blocking_total)
             break
@@ -766,8 +982,10 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                            "budget_exhausted" if iteration == max_iterations
                            else "no_actionable_issues", iteration)
             break
-        plan = visual_fix.plan_repairs(llm, issues, pres, deck_images,
-                                       image_slides)
+        author_actions = []
+        plan = visual_fix.plan_repairs(
+            llm, issues, pres, list(images_by_slide.values()),
+            list(images_by_slide.keys()), author_actions=author_actions)
         result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
         round_report = {
             "iteration": iteration,
@@ -775,6 +993,9 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
             "operations_applied": len(result["applied"]),
             "operations_skipped": len(result["skipped"]),
         }
+        if result["applied"]:
+            round_report["changes"] = visual_fix.describe_changes(
+                result["applied"])
         if result["skipped"]:
             # Why nothing changed matters more than that nothing changed:
             # "bad shape_index" means the fix targets something the repair
@@ -788,16 +1009,30 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                            "operations_planned=%d operations_skipped=%d",
                            iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
-        touched = sorted({op["slide"] for op in result["applied"]})
-        carried += [i for i in issues if i.get("slide") not in touched]
+        if result.get("slides_reordered"):
+            # Every slide number just changed: nothing rendered or carried
+            # still points at the right slide, so start over on the whole scope.
+            images_by_slide.clear()
+            carried = []
+            review_scope = initial_scope
+            continue
+        touched = visual_fix.touched_slides(result["applied"])
+        carried += [i for i in issues if i.get("check") != "coherence"
+                    and i.get("slide") not in touched]
         review_scope = touched
 
-    remaining = in_scope + carried
-    out = {"passed": False,
-           "iterations": len(repair_rounds) + 1,
-           "repair_rounds": repair_rounds,
-           "issues": remaining}
-    if repair_rounds and not repair_rounds[-1]["operations_applied"]:
+    remaining = blocking_issues(found) + carried
+    out = _outcome(False, len(repair_rounds) + 1, repair_rounds, remaining,
+                   found, reviewed, checks, not_reviewed, author_actions)
+    if repair_rounds and not repair_rounds[-1]["operations_applied"] \
+            and not repair_rounds[-1]["operations_skipped"]:
+        out["repair_note"] = (
+            "The repair planner found no operation that can fix what is "
+            "left — typically content that was never built. Do what "
+            "action_required says with the editing tools, then call "
+            "visual_repair_slides on those slides. Repeating this call as it "
+            "is will not help.")
+    elif repair_rounds and not repair_rounds[-1]["operations_applied"]:
         # Tell the agent what a zero-applied round means, so it stops the
         # deck rather than re-running an identical call.
         out["repair_note"] = (
@@ -816,13 +1051,72 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                    out["iterations"], len(repair_rounds), len(remaining),
                    int((time.monotonic() - loop_started) * 1000))
     for key in ("raw_review", "note"):
-        if key in verdict:
-            out[key] = verdict[key]
+        if key in visual:
+            out[key] = visual[key]
     return out
 
 
+def _outcome(passed, iterations, repair_rounds, remaining, found, reviewed,
+             checks, not_reviewed, author_actions):
+    minor = [i for i in found if i not in blocking_issues(found)]
+    out = {"passed": passed,
+           "iterations": iterations,
+           "repair_rounds": repair_rounds,
+           "issues": remaining,
+           "minor_issues": minor[:MAX_MINOR_REPORTED],
+           "slides_reviewed": len(reviewed),
+           "checks": checks}
+    if not passed and remaining:
+        # What the repair engine cannot do by construction — write missing
+        # content, invent a figure — goes back to the agent as instructions,
+        # in the planner's words where it gave any.
+        # A remaining issue on a slide the planner said nothing about still
+        # needs an instruction: fall back to the reviewer's suggested fix.
+        covered = {a.get("slide") for a in author_actions}
+        actions = list(author_actions)
+        for issue in remaining:
+            if issue.get("slide") not in covered:
+                covered.add(issue.get("slide"))
+                actions.append({"slide": issue.get("slide"),
+                                "action": issue.get("suggested_fix")
+                                or issue.get("description")})
+        out["action_required"] = actions
+    if not_reviewed:
+        out["slides_not_reviewed"] = not_reviewed
+        out["review_note"] = (
+            f"Slides {not_reviewed[0]}-{not_reviewed[-1]} were beyond "
+            f"VISION_LLM_MAX_SLIDES and were not reviewed; run "
+            f"visual_repair_slides with slides=[...] on them.")
+    return out
+
+
+def _inventory_text(entry):
+    """One slide's inventory line for the vision reviewer."""
+    parts = [f"slide {entry['slide']} (layout \"{entry['layout']}\")"]
+    parts.append(f"title: {entry['title']!r}" if entry.get("title")
+                 else "title: none")
+    elements = []
+    for element in entry["elements"]:
+        if element.get("role") == "title":
+            continue
+        desc = f"#{element['shape_index']} {element['kind']}"
+        if element.get("text"):
+            desc += f": {element['text'][:160]!r}"
+        elif element.get("empty"):
+            desc += " (empty)"
+        if element.get("chart"):
+            desc += f" {json.dumps(element['chart'], ensure_ascii=False)[:160]}"
+        if element.get("drawn_over_by"):
+            desc += f" [drawn over by #{element['drawn_over_by']}]"
+        elements.append(desc)
+    parts.append("elements: " + ("; ".join(elements) if elements
+                                 else "none besides the title"))
+    return " — ".join(parts)
+
+
 def review_prompt(has_reference: bool, focus: str = None,
-                  slides: list = None, risky_fonts=None) -> str:
+                  slides: list = None, risky_fonts=None, inventory=None,
+                  image_offset: int = 0) -> str:
     prompt = REVIEW_PROMPT.format(
         ref_note=(". The FIRST images are the reference template's slides; "
                   "the deck under review follows" if has_reference else ""),
@@ -831,13 +1125,19 @@ def review_prompt(has_reference: bool, focus: str = None,
     )
     if slides:
         mapping = ", ".join(f"image {i} = slide {n}"
-                            for i, n in enumerate(slides, start=1))
+                            for i, n in enumerate(slides,
+                                                  start=image_offset + 1))
         prompt += (
             f"\nYou are shown only part of a larger deck: {mapping}. Report "
             "every issue with the slide number given here, not the image "
             "position, and judge each slide on its own merits."
         )
+    if inventory:
+        prompt += ("\n\nWhat each slide's file contains (shape_index, kind, "
+                   "text), to compare with what the image shows:\n"
+                   + "\n".join(_inventory_text(e) for e in inventory))
     prompt += fonts.qa_font_caveat(risky_fonts)
     if focus:
-        prompt += f"\nAdditional focus requested by the caller: {focus}"
+        prompt += (f"\nAdditional focus requested by the caller (on top of, "
+                   f"never instead of, the full checklist): {focus}")
     return prompt
