@@ -693,7 +693,11 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     max_slides = None if slides else _slide_cap()
     if max_iterations is None:
         max_iterations = int(os.environ.get("VISUAL_QA_MAX_ITERATIONS", "3"))
-    max_iterations = max(1, max_iterations)
+    # The budget counts inspections, so 1 would inspect and return without
+    # ever repairing — which is what an orchestrator asking for "one quick
+    # round" means by 1 and never gets. Two is the smallest budget that
+    # repairs: inspect, repair, re-inspect.
+    max_iterations = max(2, max_iterations)
 
     # Constant for the whole loop: repairs never change which fonts the deck
     # names, and re-scanning per round would only cost time.

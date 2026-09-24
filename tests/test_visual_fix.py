@@ -548,6 +548,21 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         self.assertEqual(len(outcome["repair_rounds"]), 2)
         self.assertTrue(outcome["issues"])
 
+    def test_budget_of_one_still_repairs(self):
+        """max_iterations counts inspections: 1 used to inspect and return
+        without repairing, which is never what a repair call asks for."""
+        plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
+                 "size_pt": 20}]
+        os.environ["VISUAL_QA_MAX_ITERATIONS"] = "1"
+        try:
+            outcome, calls = self._run(
+                [self._failing(1), {"passed": True, "issues": []}], [plan])
+        finally:
+            os.environ.pop("VISUAL_QA_MAX_ITERATIONS")
+        self.assertTrue(outcome["passed"])
+        self.assertEqual(calls["plan"], 1)
+        self.assertEqual(outcome["repair_rounds"][0]["operations_applied"], 1)
+
     def test_stops_when_a_repair_round_does_not_reduce_issues(self):
         plan = [{"op": "set_font_size", "slide": 1, "shape_index": 0,
                  "size_pt": 20}]

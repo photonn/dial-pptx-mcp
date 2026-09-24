@@ -133,9 +133,10 @@ def register_visual_tools(app: FastMCP, presentations):
 
         slides: 1-based slide numbers to repair; omit for the whole deck.
         focus: extra instruction for the reviewer.
-        max_iterations: inspect/repair rounds for this call (default
-        VISUAL_QA_MAX_ITERATIONS, normally 3). Lower it for a quick pass on
-        a single slide.
+        max_iterations: inspections for this call, including the first
+        (default VISUAL_QA_MAX_ITERATIONS, normally 3). 2 is one repair
+        round and a re-check — the quickest pass; values below 2 are raised
+        to 2. To only look, use visual_inspect_slides instead.
 
         Returns {"passed", "iterations", "repair_rounds", "issues"} — with
         "issues" listing what could not be resolved. A false "passed" is a

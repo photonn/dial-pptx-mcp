@@ -292,7 +292,7 @@ When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools
 
 `slides` is a list of 1-based slide numbers; omit it to work on the whole deck. Issue slide numbers are always absolute deck positions, even when only a subset was rendered, and a scoped repair call never touches a slide outside `slides`. Because LibreOffice converts the whole deck either way, a narrow selection saves the vision call and the repair round, not the render.
 
-`max_iterations` defaults to `VISUAL_QA_MAX_ITERATIONS` (3) and can be lowered per call for a quick single-slide pass. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
+`max_iterations` counts inspections, the first included; it defaults to `VISUAL_QA_MAX_ITERATIONS` (3) and can be lowered per call to 2 (one repair and a re-check) for a quick single-slide pass. Lower values are raised to 2, since a budget of 1 would inspect and never repair. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
 
 ### Export
 
