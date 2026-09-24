@@ -27,6 +27,7 @@ PDF, and a corporate template has dozens of them — reporting each one buries t
 findings that matter. Placeholder text actually present in the deck is a
 different matter and is reported.
 """
+import collections
 import io
 import re
 import zipfile
@@ -118,12 +119,14 @@ def _check_package(blob, report):
                    f"Package entry '{broken}' has a bad CRC.",
                    "Rebuild the presentation; this deck cannot be delivered.")
 
-    entries = archive.namelist()
-    names = set(entries)
     # A set hides the one defect that reads as valid part-by-part: two parts
     # sharing a partname write two entries under one name, which PowerPoint
-    # offers to repair and LibreOffice refuses to open at all.
-    repeated = sorted({name for name in entries if entries.count(name) > 1})
+    # offers to repair and LibreOffice refuses to open at all. Count once and
+    # keep the set for the membership tests below — this runs on every export,
+    # and a media-heavy deck has enough entries for a per-entry rescan to show.
+    counts = collections.Counter(archive.namelist())
+    names = set(counts)
+    repeated = sorted(name for name, seen in counts.items() if seen > 1)
     if repeated:
         report.add(ERROR, "duplicate_part",
                    "The package holds more than one part named "
