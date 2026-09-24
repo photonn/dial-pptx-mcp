@@ -57,7 +57,12 @@ every `r:embed`). Image/media/font parts are shared, chart/SmartArt/embedded par
 `update_chart_data` on a copy rewrites the original's chart. `cSld` and `spTree` are emptied and refilled rather than
 replaced: python-pptx binds a slide's `shapes` collection to the spTree *element* on first access, and `add_slide`
 touches it while cloning layout placeholders, so swapping the element out silently detaches every later edit. The
-notesSlide rel is never copied (one notes part per slide); the notes text is transferred instead. **The intended
+notesSlide rel is never copied (one notes part per slide); the notes text is transferred instead. `delete_slide`
+renumbers the slide parts that remain, because python-pptx names a new slide part from `len(<p:sldIdLst>)`
+(`PresentationPart._next_slide_partname`) rather than from the free-slot search `package.next_partname` does: leave a
+gap and the next `add_slide` collides with a live part, the saved zip carries two entries under one name, LibreOffice
+refuses the file and PowerPoint offers to repair it — while every part in it is individually valid, which is why
+`deck_validation` reads `namelist()` as a list (`duplicate_part`) and not as a set. **The intended
 template flow is duplicate-then-fill**, not `add_slide` — a layout holds placeholders, not the template's artwork.
 
 **Structural validation (`deck_validation.py`, `tools/validation_tools.py`).** The axis visual QA cannot see: a deck

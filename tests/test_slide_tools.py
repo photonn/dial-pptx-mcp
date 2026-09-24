@@ -8,6 +8,7 @@ and its chart is edited to prove the two slides do not share one chart part.
 """
 import io
 import unittest
+import zipfile
 
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData
@@ -72,6 +73,73 @@ class TestDeleteAndMove(unittest.TestCase):
         self.assertEqual(slide_titles(roundtrip(pres)),
                          ["Slide 2", "Slide 0", "Slide 1"])
 
+class TestPartnamesAfterDelete(unittest.TestCase):
+    """A deletion must not leave a gap in the slide partname sequence.
+
+    python-pptx names a new slide part from len(<p:sldIdLst>), so a gap makes
+    the next add_slide collide with a live part. The saved zip then carries
+    two entries under one name: PowerPoint offers to repair the file and
+    LibreOffice refuses to open it, while every part in it is individually
+    valid.
+    """
+
+    @staticmethod
+    def partnames(pres):
+        return [str(slide.part.partname) for slide in pres.slides]
+
+    @staticmethod
+    def entries(pres):
+        buf = io.BytesIO()
+        pres.save(buf)
+        return zipfile.ZipFile(io.BytesIO(buf.getvalue())).namelist()
+
+    def assert_no_duplicate_entries(self, pres):
+        entries = self.entries(pres)
+        duplicates = {name for name in entries if entries.count(name) > 1}
+        self.assertEqual(duplicates, set())
+
+    def test_delete_keeps_the_partname_sequence_dense(self):
+        pres = build_deck(4)
+        ppt_utils.delete_slide(pres, 1)
+        self.assertEqual(self.partnames(pres),
+                         ["/ppt/slides/slide1.xml", "/ppt/slides/slide2.xml",
+                          "/ppt/slides/slide3.xml"])
+
+    def test_add_slide_after_delete_writes_one_part_per_name(self):
+        pres = build_deck(4)
+        ppt_utils.delete_slide(pres, 1)
+        pres.slides.add_slide(pres.slide_layouts[5]).shapes.title.text = "New"
+        self.assert_no_duplicate_entries(pres)
+        self.assertEqual(slide_titles(roundtrip(pres)),
+                         ["Slide 0", "Slide 2", "Slide 3", "New"])
+
+    def test_duplicate_after_delete_writes_one_part_per_name(self):
+        pres = build_deck(4)
+        ppt_utils.delete_slide(pres, 1)
+        ppt_utils.duplicate_slide(pres, 0)
+        self.assert_no_duplicate_entries(pres)
+        self.assertEqual(slide_titles(roundtrip(pres)),
+                         ["Slide 0", "Slide 2", "Slide 3", "Slide 0"])
+
+    def test_renumbering_preserves_each_slide_relationships(self):
+        """Renaming the parts must not disturb what they point at."""
+        pres = build_deck(3)
+        ppt_utils.delete_slide(pres, 0)
+        reopened = roundtrip(pres)
+        for slide in reopened.slides:
+            self.assertIsNotNone(slide.slide_layout)
+        self.assertEqual(slide_titles(reopened), ["Slide 1", "Slide 2"])
+
+    def test_repeated_delete_and_add_stays_clean(self):
+        pres = build_deck(5)
+        for _ in range(3):
+            ppt_utils.delete_slide(pres, 0)
+            pres.slides.add_slide(pres.slide_layouts[5])
+        self.assert_no_duplicate_entries(pres)
+        self.assertEqual(len(roundtrip(pres).slides), 5)
+
+
+class TestDeleteAndMoveIndexing(unittest.TestCase):
     def test_check_index_reports_the_valid_range(self):
         pres = build_deck(2)
         self.assertIsNone(ppt_utils.check_index(pres, 1))
