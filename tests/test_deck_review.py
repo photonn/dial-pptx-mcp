@@ -199,6 +199,35 @@ class TestBatchedReview(EnvCase):
         self.assertIn("VISION_LLM_MAX_SLIDES", outcome["review_note"])
 
 
+class TestCallerContext(EnvCase):
+    def test_review_threads_see_the_callers_request_context(self):
+        """The DIAL provider reads the caller's credentials from the MCP
+        SDK's request contextvar; the parallel review threads must see it or
+        every DIAL-routed review fails with "No DIAL credentials"."""
+        from mcp.server.lowlevel.server import request_ctx
+
+        os.environ["VISION_LLM_BATCH_SLIDES"] = "1"
+        seen, lock = [], threading.Lock()
+
+        def fake_review(self_llm, images, prompt, timeout=None):
+            with lock:
+                seen.append(request_ctx.get(None))
+            return {"passed": True, "issues": []}
+
+        marker = object()
+        token = request_ctx.set(marker)
+        try:
+            with patch.object(visual_qa, "_render_deck",
+                              return_value=[b"png"] * 3), \
+                 patch.object(visual_qa.VisionLLM, "review", fake_review):
+                visual_qa.inspect_presentation(titled_deck(["A", "B", "C"]))
+        finally:
+            request_ctx.reset(token)
+        # Three visual batches plus the coherence call, all with the context.
+        self.assertEqual(len(seen), 4)
+        self.assertTrue(all(value is marker for value in seen))
+
+
 class TestCoherenceInTheLoop(EnvCase):
     def _script(self, visual, coherence):
         """Fake LLM: image-less calls are the coherence review."""

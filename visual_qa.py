@@ -21,6 +21,7 @@ The LLM endpoint speaks the OpenAI Responses API with image input
 - SOFFICE_PATH          LibreOffice binary if not "soffice" on PATH
 """
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -775,12 +776,20 @@ def _review(llm, pres, images, image_slides, focus, risky_fonts,
             image_offset=len(reference_images))
         return numbers, llm.review(reference_images + batch_images, prompt)
 
+    def submit(pool, fn, *args):
+        # Pool threads start with an empty context, and the caller's DIAL
+        # credentials live in the MCP SDK's request contextvar: without a
+        # copy, the DIAL provider sees no request and no Api-Key. Each task
+        # needs its own copy — one Context cannot be entered by two threads.
+        return pool.submit(contextvars.copy_context().run, fn, *args)
+
     workers = max(1, min(_max_parallel(), len(batches) + bool(coherence)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        coherence_future = pool.submit(
-            llm.review, [], deck_review.coherence_prompt(outline)) \
+        coherence_future = submit(
+            pool, llm.review, [], deck_review.coherence_prompt(outline)) \
             if coherence else None
-        batch_results = list(pool.map(review_batch, batches))
+        batch_futures = [submit(pool, review_batch, b) for b in batches]
+        batch_results = [f.result() for f in batch_futures]
 
     issues, unparseable = [], None
     for numbers, verdict in batch_results:
