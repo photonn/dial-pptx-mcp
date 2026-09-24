@@ -305,12 +305,25 @@ class TestLayoutPruning(unittest.TestCase):
         if not (os.environ.get("SOFFICE_PATH") or shutil.which("soffice")):
             self.skipTest("LibreOffice not installed")
         import visual_qa
+        import pymupdf
         pres = Presentation(str(self.DEMO))
+        raw_bytes = visual_qa._subset_deck_bytes_unpruned(
+            self._bytes(pres), [2, 5])
+        # LibreOffice's first conversion in a process can anti-alias a few
+        # glyphs differently from every later one — same input, different
+        # bytes — so warm it up and compare pixels with a small tolerance.
+        # A wrongly pruned layout or master loses a whole background or
+        # placeholder, which is far beyond it.
+        visual_qa.render_pptx_bytes_to_pngs(raw_bytes)
         pruned = visual_qa._render_deck(pres, slides=[2, 5])
-        raw = visual_qa.render_pptx_bytes_to_pngs(
-            visual_qa._subset_deck_bytes_unpruned(
-                self._bytes(pres), [2, 5]))
-        self.assertEqual(pruned, raw)
+        raw = visual_qa.render_pptx_bytes_to_pngs(raw_bytes)
+        self.assertEqual(len(pruned), len(raw))
+        for a, b in zip(pruned, raw):
+            pa, pb = pymupdf.Pixmap(a), pymupdf.Pixmap(b)
+            self.assertEqual((pa.width, pa.height), (pb.width, pb.height))
+            differing = sum(1 for x, y in zip(pa.samples, pb.samples)
+                            if x != y)
+            self.assertLess(differing / len(pa.samples), 0.02)
 
     @staticmethod
     def _bytes(pres):
