@@ -86,7 +86,9 @@ def register_content_tools(app: FastMCP, presentations: Dict, get_current_presen
         ),
     )
     def get_slide_info(slide_index: int, presentation_id: Optional[str] = None) -> Dict:
-        """Get information about a specific slide."""
+        """Get a slide's layout, placeholders and every element on it — with
+        its 0-based index (the shape_index manage_shape and manage_text
+        take), position and size in inches, and a preview of its text."""
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:

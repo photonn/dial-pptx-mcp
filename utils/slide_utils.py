@@ -35,6 +35,11 @@ __all__ = [
     "get_speaker_notes",
     "set_speaker_notes",
     "pin_inherited_geometry",
+    "delete_shape",
+    "set_shape_z_order",
+    "move_shape_to_slide",
+    "reorder_slides",
+    "clear_shape_text",
 ]
 
 # Relationship targets shared (referenced) rather than cloned by a duplicate.
@@ -428,3 +433,175 @@ def pin_inherited_geometry(shape):
     shape.left, shape.top = left, top
     shape.width, shape.height = width, height
     return True
+
+
+# ---- Shape-level operations ----
+#
+# python-pptx can add a shape but has no API to remove one, restack one, or
+# move one to another slide. These work on the shape's XML element directly,
+# with the relationship bookkeeping a picture or chart needs: its bytes live
+# in a separate part the slide reaches through an rId, so moving the element
+# without re-relating it would leave a dangling r:embed on the new slide and an
+# orphaned part on the old one.
+
+_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_EXT_LST = qn("p:extLst")
+_C_NV_PR = qn("p:cNvPr")
+
+
+def _referenced_rids(element):
+    """Every rId an element's XML refers to (r:embed, r:link, r:id, ...)."""
+    rids = set()
+    for node in element.iter():
+        for key, value in node.attrib.items():
+            if key.startswith(_R_NS):
+                rids.add(value)
+    return rids
+
+
+def _drop_unreferenced_rels(part, rids):
+    """Drop the given rels once nothing left in the part's XML refers to them.
+
+    A picture pasted twice shares one image rId, so a rel is only dropped when
+    no remaining element still names it — python-pptx's own drop_rel counts
+    only r:id attributes and would miss a surviving r:embed.
+    """
+    still_used = _referenced_rids(part._element)
+    for rId in rids:
+        if rId not in still_used and rId in part.rels:
+            rel = part.rels[rId]
+            if rel.reltype not in (RT.SLIDE_LAYOUT, RT.NOTES_SLIDE):
+                part.rels.pop(rId)
+
+
+def _tree_insert(sp_tree, element):
+    """Append a shape to an spTree, keeping a trailing p:extLst last."""
+    ext = sp_tree.find(_EXT_LST)
+    if ext is not None:
+        ext.addprevious(element)
+    else:
+        sp_tree.append(element)
+
+
+def delete_shape(slide, shape):
+    """Remove a shape from its slide, dropping the picture/chart part it
+    referenced when nothing else on the slide still uses it."""
+    element = shape._element
+    rids = _referenced_rids(element)
+    element.getparent().remove(element)
+    _drop_unreferenced_rels(slide.part, rids)
+
+
+def set_shape_z_order(slide, shape, where):
+    """Restack a shape: "front" draws it above every other shape on the slide,
+    "back" below every other shape (the slide background and the layout's
+    artwork still sit behind it)."""
+    element = shape._element
+    sp_tree = element.getparent()
+    sp_tree.remove(element)
+    if where == "front":
+        _tree_insert(sp_tree, element)
+    elif where == "back":
+        # The tree's own group properties always come first.
+        position = sum(1 for child in sp_tree if child.tag in _TREE_PROPS)
+        sp_tree.insert(position, element)
+    else:
+        raise ValueError(f"where must be 'front' or 'back', not {where!r}")
+
+
+def clear_shape_text(shape):
+    """Empty a shape's text (every cell, for a table), keeping the shape and
+    its formatting. Returns False when the shape holds no text container."""
+    if shape.has_text_frame:
+        shape.text_frame.text = ""
+        return True
+    if getattr(shape, "has_table", False):
+        for row in shape.table.rows:
+            for cell in row.cells:
+                cell.text_frame.text = ""
+        return True
+    return False
+
+
+def _matching_placeholder(target_slide, source_shape):
+    """The target slide's placeholder that should receive a placeholder's
+    content: same idx first, then same type."""
+    fmt = source_shape.placeholder_format
+    by_type = None
+    for candidate in target_slide.placeholders:
+        cfmt = candidate.placeholder_format
+        if cfmt.idx == fmt.idx and cfmt.type == fmt.type:
+            return candidate
+        if by_type is None and cfmt.type == fmt.type:
+            by_type = candidate
+    return by_type
+
+
+def move_shape_to_slide(source_slide, shape, target_slide):
+    """Move a shape from one slide to another, keeping its geometry.
+
+    A placeholder cannot be moved as an element: it belongs to its slide's
+    layout, and a second placeholder with the same idx on the target would
+    fight the one already there. Its *content* is moved instead — into the
+    target's matching placeholder — and the source placeholder is emptied.
+
+    Anything else moves whole, with its rels re-created on the target slide
+    (so a picture's r:embed or a chart's r:id still resolves) and its shape
+    ids renumbered to be unique there.
+
+    Returns the moved content's 0-based shape index on the target slide.
+    Raises ValueError when the move is not possible.
+    """
+    if shape.is_placeholder:
+        target = _matching_placeholder(target_slide, shape)
+        if target is None or not shape.has_text_frame or not target.has_text_frame:
+            raise ValueError(
+                "placeholder content can only move into a matching placeholder "
+                "on the target slide, and the target has none")
+        tx_body = target._element.txBody
+        tx_body.getparent().replace(tx_body,
+                                    copy.deepcopy(shape._element.txBody))
+        shape.text_frame.text = ""
+        return list(target_slide.shapes).index(target)
+
+    element = shape._element
+    pin_inherited_geometry(shape)
+    rid_map = {}
+    for rId in _referenced_rids(element):
+        rel = source_slide.part.rels[rId]
+        if rel.is_external:
+            rid_map[rId] = target_slide.part.relate_to(
+                rel.target_ref, rel.reltype, is_external=True)
+        else:
+            rid_map[rId] = target_slide.part.relate_to(
+                rel.target_part, rel.reltype)
+    element.getparent().remove(element)
+    for node in element.iter():
+        for key, value in list(node.attrib.items()):
+            if key.startswith(_R_NS) and value in rid_map:
+                node.set(key, rid_map[value])
+
+    target_tree = target_slide.shapes._spTree
+    used = {int(n.get("id")) for n in target_tree.iter(_C_NV_PR)
+            if (n.get("id") or "").isdigit()}
+    next_id = max(used, default=1) + 1
+    for node in element.iter(_C_NV_PR):
+        node.set("id", str(next_id))
+        next_id += 1
+    _tree_insert(target_tree, element)
+    _drop_unreferenced_rels(source_slide.part, set(rid_map))
+    return [s._element for s in target_slide.shapes].index(element)
+
+
+def reorder_slides(pres, order):
+    """Put the deck's slides in `order`: a permutation of the current 0-based
+    slide indexes, listing the slide that should come first, then second, …"""
+    sld_id_lst = _sld_id_lst(pres)
+    entries = list(sld_id_lst)
+    if sorted(order) != list(range(len(entries))):
+        raise ValueError(
+            f"order must list every slide index 0-{len(entries) - 1} exactly once")
+    for entry in entries:
+        sld_id_lst.remove(entry)
+    for index in order:
+        sld_id_lst.append(entries[index])

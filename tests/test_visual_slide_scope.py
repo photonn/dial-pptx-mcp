@@ -21,6 +21,9 @@ VISION_ENV = {
     "VISION_LLM_ENDPOINT": "https://example.invalid/responses",
     "VISION_LLM_API_KEY": "k",
     "VISION_LLM_MODEL": "m",
+    # The deck-level story review is its own LLM call; tests that script the
+    # visual verdicts turn it off (tests.test_deck_review covers it).
+    "VISUAL_QA_COHERENCE": "false",
 }
 ENV_VARS = list(VISION_ENV) + ["VISUAL_QA_ENFORCE", "VISUAL_QA_EXPORT_GATE"]
 

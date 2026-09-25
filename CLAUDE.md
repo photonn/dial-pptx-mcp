@@ -189,6 +189,25 @@ chart legend/data-label toggles and axis titles) applied with python-pptx, re-re
 `VISUAL_QA_MAX_ITERATIONS`. Keep repairs whitelist-driven — never execute model-supplied code or widen the operation set
 without validation.
 
+**What to check is the server's decision.** `REVIEW_PROMPT` is the complete checklist; the tools' `focus` is only ever
+appended to it. The whole-deck review is batched (`VISION_LLM_BATCH_SLIDES` images per request, high detail, in
+parallel) — one request carrying 15+ images is where the reviewer started passing blank slides — and each batch gets
+the slides' inventory from `deck_review.slide_outline` (element index, kind, text, `drawn_over_by`), so it can tell
+text that exists but is covered from text that was never there. `deck_review.py` adds one text-only coherence call
+over the whole deck's outline (agenda vs. section dividers, content on the wrong slide, blank slides, contradictions)
+— the defects an orchestrator actually ships are an off-by-one `slide_index`, not a layout bug, and no per-slide
+review sees them. It runs on whole-deck calls only (an agenda cannot be checked against two slides), re-runs every
+round, and a failed coherence call degrades to the visual review rather than failing QA. **`passed` is ours**: no
+blocking issue left, never the model's flag — which it sets beside critical findings. A whole deck beyond
+`VISION_LLM_MAX_SLIDES` reports `slides_not_reviewed` and is not cleared. The repair ops now include
+`move_shape_to_slide`, `reorder_slides` (applied last; returns `slides_reordered` so the loop restarts its scope),
+z-order, `clear_text` and `set_font_color`; the planner may not invent content and returns `author_actions` instead,
+surfaced as `action_required`. `apply_repairs` resolves shape indexes against a per-slide snapshot taken before any op —
+resolving against the live slide let a delete shift every later index on that slide onto the wrong shape. Each re-review judges the slides the previous round touched against their pre-round verdicts (`_judge_round`): a slide that scored worse is rolled back by restoring the pre-round deck bytes and replaying the round's other operations — exact, because operations address the pre-round deck and are deterministic — and a cross-slide move is dropped at both ends. The restore refills the existing `Presentation` object's `__dict__` (`_restore_deck`) rather than replacing it, because the store and every caller hold that object. `apply_repairs` also refuses shrinking a chart/table/picture/group below `MIN_GRAPHIC_SCALE` and moving an on-slide shape off the slide — the planner's habitual way of "making room" was to crush the chart. The shape
+primitives (`delete_shape`, `set_shape_z_order`, `move_shape_to_slide`, `reorder_slides` in `utils/slide_utils.py`)
+also back the `manage_shape` tool; `move_shape_to_slide` re-relates a picture's or chart's part on the target and
+renumbers shape ids, and moves a placeholder's *text* into the target's matching placeholder rather than the element.
+
 Text in a deck is not only in text frames, and both halves of the loop must keep covering the rest: `REVIEW_PROMPT`
 asks explicitly about chart axis/data labels, table cells and diagram/SmartArt node labels, and `describe_slides`
 reports table geometry and chart structure so the planner can address them. A new "text container" needs work in both

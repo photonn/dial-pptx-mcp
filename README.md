@@ -15,7 +15,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | File I/O | local disk paths | DIAL Files API: template in via Quick Apps `file:data::` references, deck out via `export_presentation` returning a DIAL file URL |
 | Images | local path or base64 | `add_image_from_dial_url` fetches orchestrator-generated images from DIAL storage server-side, with aspect-ratio-aware placement |
 | Icons | none | `render_svg_icon` + `add_icon_to_slide`: the agent draws the icon as SVG (`get_icon_guidance` holds the style guide), the server rasterizes it to a transparent PNG, has the vision model check the render for artifacts, and holds it under a handle for placement |
-| Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations` — python-pptx has no API for any of these |
+| Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations`, and `manage_shape` (delete, move, restack, move an element to another slide) — python-pptx has no API for any of these |
 | Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
 | Validation | none | `validate_presentation`: package, relationship, geometry, chart, table and placeholder-text checks, folded into export |
 | Design | — | `get_design_guidance` (deck design as a document the agent reads), `get_template_instructions` (the template author's own rules, shipped as a `.md` beside the template instead of in the system prompt), `render_slide_previews` (see the template before building on it) and `render_deck_summary_card` (show the finished deck as one image) |
@@ -54,9 +54,12 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
 | `VISION_LLM_PROVIDER` | no | auto | Force the backend: `direct` or `dial` (default: `direct` when `VISION_LLM_ENDPOINT` is set, else `dial`) |
 | `VISION_LLM_API_VERSION` | no | `2025-04-01-preview` | `?api-version=` added to the vision call when the endpoint URL doesn't already carry one. Azure OpenAI (and DIAL Core's Azure upstream) reject requests without it — `api-version is a required query parameter`. The default covers both the Responses API and chat completions with image input; an `api-version` already present in `VISION_LLM_ENDPOINT` always wins |
-| `VISION_LLM_MAX_SLIDES` | no | `15` | Cap on slides sent per whole-deck inspection (an explicit `slides` list is never capped) |
+| `VISION_LLM_MAX_SLIDES` | no | `60` | Most slides one whole-deck review covers. Slides beyond it come back in `slides_not_reviewed` and the deck is not marked `passed` (an explicit `slides` list is never capped) |
+| `VISION_LLM_BATCH_SLIDES` | no | `6` | Slides per vision request. A deck is reviewed in batches of this size, run in parallel; one request carrying 15+ slides is where the reviewer started missing blank slides |
+| `VISION_LLM_MAX_PARALLEL` | no | `4` | Vision requests in flight at once for one review (the coherence call counts as one) |
+| `VISUAL_QA_COHERENCE` | no | `true` | Whole-deck calls also run the deck-level story review (agenda vs. sections, content on the wrong slide, blank slides, contradictions) — one text-only call. `false` turns it off |
 | `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely. It governs slide inspection only — `render_svg_icon` still reviews an icon whenever a vision model is configured |
-| `VISUAL_QA_MAX_ITERATIONS` | no | `10` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
+| `VISUAL_QA_MAX_ITERATIONS` | no | `3` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
 | `VISUAL_QA_EXPORT_GATE` | no | `false` | `true` also runs a whole-deck inspect-repair loop inside export/save and refuses unverified decks |
 | `VISUAL_QA_ON_UNRESOLVED` | no | `report` | Export gate only: `report` fails the export with the issue list, `export_as_is` ships the deck |
 | `VISUAL_QA_ON_ERROR` | no | `block` | Export gate only: `allow` exports when inspection itself cannot run |
@@ -210,6 +213,7 @@ python-pptx's only entry point is `slides.add_slide(layout)`, which appends a ba
 | `duplicate_slide(presentation_id, slide_index, insert_after?, count?)` | Copies a slide with all of its content and formatting. Pictures are shared (same bytes); charts, SmartArt and embedded objects are cloned, so editing the copy's chart does not rewrite the original's. Speaker notes travel with it |
 | `delete_slide(presentation_id, slide_index)` | Removes a slide and its package relationship |
 | `move_slide(presentation_id, slide_index, new_index)` | Reorders |
+| `manage_shape(presentation_id, slide_index, shape_index, operation, ...)` | One element on a slide: `delete`, `clear_text`, `set_geometry` (inches), `bring_to_front` / `send_to_back`, `move_to_slide` (keeps position; a picture's or chart's parts move with it). `get_slide_info` lists each element's index, geometry in inches and a text preview. Deleting a layout placeholder empties it instead, since the layout would otherwise show its prompt text |
 | `copy_slide_between_presentations(source, slide_index, target, ...)` | Merges decks. Everything the slide references is cloned into the target package; inherited theme colours and fonts re-resolve against the *target* master, so the copy is worth inspecting |
 | `manage_speaker_notes(presentation_id, operation, slide_index?, text?)` | `get` / `set` / `clear`. Notes belong in the notes pane — a "notes" textbox is visible to the audience |
 
@@ -287,12 +291,18 @@ When a vision LLM is configured (`VISION_LLM_*`), the server registers two tools
 
 | Tool | What it does |
 |---|---|
-| `visual_inspect_slides(presentation_id, slides?, focus?, reference_presentation_id?)` | Renders the selected slides (LibreOffice → PDF → PNG) and has the vision LLM review them for template/brand fidelity and text placement problems (see below). Read-only: returns `{"passed", "issues": [{slide, severity, description, suggested_fix}]}` |
-| `visual_repair_slides(presentation_id, slides?, focus?, max_iterations?)` | Inspects, then **repairs the deck itself** and re-inspects, looping until the slides pass or the budget runs out. The LLM is shown the issues, the affected slides' structure and their images, and returns a plan of whitelisted operations (move/resize shape, set/fit font size, autofit, set text, word wrap, delete shape, table column width/row height/cell text, chart legend, data labels and axis titles) that are validated and applied with python-pptx |
+| `visual_inspect_slides(presentation_id, slides?, focus?, reference_presentation_id?)` | Renders the selected slides (LibreOffice → PDF → PNG) and runs the full review (see below). Read-only: returns `{"passed", "issues": [{slide, severity, category, element, description, suggested_fix, check}], "slides_reviewed", "checks"}` |
+| `visual_repair_slides(presentation_id, slides?, focus?, max_iterations?)` | Reviews, then **repairs the deck itself** and re-reviews, looping until the slides pass or the budget runs out. The LLM is shown the issues, the affected (and related) slides' structure and their images, and returns a plan of whitelisted operations — move/resize, set/fit font size, autofit, set/clear text, font colour, word wrap, delete, bring to front/send to back, **move a shape to another slide**, **reorder slides**, table column width/row height/cell text, chart legend, data labels and axis titles — validated and applied with python-pptx. What no operation can fix (content that was never built) comes back as `action_required` |
 
 `slides` is a list of 1-based slide numbers; omit it to work on the whole deck. Issue slide numbers are always absolute deck positions, even when only a subset was rendered, and a scoped repair call never touches a slide outside `slides`. Because LibreOffice converts the whole deck either way, a narrow selection saves the vision call and the repair round, not the render.
 
-`max_iterations` defaults to `VISUAL_QA_MAX_ITERATIONS` (10) and can be lowered per call for a quick single-slide pass. A `"passed": false` result is a report, not a retry request: the agent should edit the content itself and inspect again, or tell the user what remains.
+**A round never leaves a slide worse than it found it.** Each re-review judges every slide the last round touched against that slide's verdict before the round (critical issues weigh more than major ones). A slide that got worse is rolled back — the pre-round deck is restored and the round's other operations are replayed, so the slides that improved keep their fixes — and the round reports `reverted_slides` and `operations_reverted`. A slide reorder that makes the deck worse is undone whole. The operations themselves refuse the usual ways a fix goes wrong: a resize may not shrink a chart, table or picture below half its width or height, and a move or resize may not push a shape that sits on the slide off it. More rounds are therefore not the cure for a repair that made things worse; the default of 3 is deliberate.
+
+`max_iterations` counts inspections, the first included; it defaults to `VISUAL_QA_MAX_ITERATIONS` (3) and can be lowered per call to 2 (one repair and a re-check) for a quick single-slide pass. Lower values are raised to 2, since a budget of 1 would inspect and never repair. A `"passed": false` result is a report, not a retry request: the agent should do what `action_required` says with the editing tools and repair those slides again, or tell the user what remains.
+
+**What the checklist covers is the server's decision, not the agent's.** `focus` is optional and only ever *added* to the full checklist; an orchestrator does not need to — and should not try to — enumerate what to look for.
+
+**"passed" is the server's verdict.** It is true only when no `critical` or `major` issue remains anywhere in scope, whatever the model's own `passed` flag says (models set it beside a critical finding often enough to matter). A repair result always carries `issues` (blocking, still open), `minor_issues` (reported, never repaired), each round's `changes`, `slides_reviewed` and `checks` (`visual`, plus `coherence` on whole-deck calls), so a pass can be audited rather than trusted.
 
 ### Export
 
@@ -302,7 +312,12 @@ Operators who want the old guarantee that no unverified deck ever leaves the ser
 
 ### What the reviewer checks
 
-Text is not only in text boxes, so neither is the review. Besides brand fidelity (colors, fonts, logo placement, layout usage) the reviewer is asked to judge **text placement and overlap wherever text is rendered**:
+Two reviews run on a whole-deck call, in parallel:
+
+- **Visual**, per slide, in batches of `VISION_LLM_BATCH_SLIDES` images sent at high detail. Beside each image the reviewer gets that slide's inventory from the file — title, each element's index, kind and text, and which text is *drawn over* by a later opaque shape — so it can tell text that exists but cannot be seen (a divider title under cards) from text that was never there, and content that does not match its title.
+- **Coherence** (`deck_review.py`), one text-only call over an outline of every slide: agenda/index items against the actual section dividers (missing, extra, out of order, misnumbered), content that belongs to another slide's title (the off-by-one `slide_index` signature: one slide blank, its neighbour carrying its cards), blank content slides, hidden text, duplicated slides, the same figure quoted two ways, narrative order, title consistency, and text quality (typos, typed bullets, literal markup, mojibake).
+
+The visual checklist covers blank or near-blank content slides, content that does not match the slide title, placeholder/sample text, hidden or stray elements, broken characters and doubled bullets, squashed or default-labelled charts, distorted or badly cropped pictures, inconsistent icons, elements crossing the template's header rule or footer, and misaligned comparable elements — as well as brand fidelity (colors, fonts, logo placement, layout usage) and **text placement and overlap wherever text is rendered**:
 
 - **Text boxes and placeholders** — overflowing, clipped, or spilling past the slide edge; text overlapping other text or sitting unreadably on top of shapes and images; unfilled placeholders; text too small or too low-contrast to read.
 - **Charts and graphs** — axis tick labels colliding with each other or truncated, data labels overlapping their bars/slices or each other, a legend covering the plot area, an axis title rotated into illegibility.
@@ -314,6 +329,8 @@ It also flags text sized badly for the space it occupies — a heading set so sm
 Overlapping or unreadable text is graded at least `major`, so it fails the verdict rather than being noted in passing.
 
 **Fitting text to its box.** The `fit_text` operation sizes text to the space it actually has, in both directions: it shrinks text that overflows and grows text that leaves its box mostly empty. The size is computed server-side from the box geometry (minus the frame's own margins, with a slack factor so text never touches its border) rather than guessed by the model, and the plan can bound it with `min_pt`/`max_pt`. Growth is anchored to the deck's own typography — at most 1.5× the shape's current size, or 44pt when the text inherits its size from the layout — so a two-word box cannot balloon to 96pt and shout over the slide. `set_autofit` sets PowerPoint's own autofit behaviour (`shrink_text`, `grow_shape`, `none`) when that suits the shape better. The size estimate is geometric, not a real text layout; the loop's re-render and re-review is what confirms it.
+
+**Structure and content repairs.** `move_shape_to_slide` moves an element — with its picture or chart part, and with fresh shape ids — to the slide whose title it matches; a placeholder's text moves into the target's matching placeholder instead. `reorder_slides` takes the whole new order and is applied after every shape operation in the plan. An out-of-sync agenda is rewritten with `set_text` from the section dividers' own titles. The planner is told never to invent facts or figures: a slide that is empty because its content was never built becomes an `action_required` entry saying what is missing. Shape indexes in a plan always refer to the slide as described, so a delete earlier in the plan cannot shift a later operation onto the wrong shape.
 
 **Reading a round that changed nothing.** `operations_applied: 0` with `operations_skipped: N` does not mean repair is disabled — it means the plan was rejected by validation. Each round now reports `skipped_reasons` (e.g. `{"bad shape_index": 2}`) and the result carries a `repair_note` explaining that repeating the call will not help. The common reason is `bad shape_index`: the fix targets something that is not a shape on the slide — typically a slide-number, footer or date placeholder inherited from the layout or master, which the repair engine cannot reach. Such reports are also often renderer artifacts (LibreOffice wraps a narrow slide-number field that PowerPoint lays out on one line), so check the deck in PowerPoint before chasing them.
 
@@ -349,27 +366,28 @@ before you build each slide, since those rules win over the general guidance.
 Call render_slide_previews to see its slides, and build by
 duplicating the template slides that fit your content (duplicate_slide)
 rather than adding bare ones.
-After you finish building each slide, call visual_inspect_slides with that
-slide's number. If it reports issues, call visual_repair_slides for the same
-slide and continue only once it passes or you have fixed the content yourself.
-Before export_presentation, call validate_presentation and fix any errors it
-reports, then call visual_inspect_slides once with no slides argument to check
-the deck as a whole. If the export response says
+Build every slide first. Then call validate_presentation and fix any errors
+it reports, then call visual_repair_slides once with no slides argument and no
+focus — the server's checklist is complete. It reviews every slide and the
+deck's story (agenda, misplaced or missing content), repairs what it can and
+re-checks — do not call visual_inspect_slides before it. If it returns
+"passed": false, do what each action_required entry says with the editing
+tools and call visual_repair_slides again with just those slides. If the export response says
 "visual_qa": "unverified", say so in your answer rather than presenting the
 deck as checked.
 After exporting, call render_deck_summary_card and attach the image it returns
 alongside the .pptx, so the user can see the finished deck in the chat.
 ```
 
-Per-slide checks are the cheap path — one render plus one vision call each, caught while the slide is still fresh in context. Keep the whole-deck pass for the end: it is the only thing that marks the deck `passed`, and it catches cross-slide inconsistencies a single-slide review cannot see.
+One whole-deck `visual_repair_slides` at the end is the cheap path — one render, one parallel set of vision batches and one coherence call, then follow-up rounds on the changed slides only. It is also the only thing that marks the deck `passed`, and the only scope that runs the coherence review, so it is the only call that catches an agenda out of sync or content built onto the wrong slide. Per-slide calls cost an orchestrator turn plus a render and a vision round trip each; keep them for the first slide you build from a new layout, where catching a mistake before you copy it pays off.
 
 ### Sizing the QA work (orchestrator budget, timeouts, pod resources)
 
 | Concern | Guidance |
 |---|---|
 | Orchestrator iterations (Quick Apps `max_iterations`, default 15) | Now includes the QA calls the agent makes. Roughly 2 calls per slide plus create/export, plus one inspect or repair per slide: a 20-slide deck needs **~65**, so set `max_iterations` to **80** (100 if slides carry charts/tables/images) |
-| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | A single-slide inspect ≈ 15–30s (render + review); a single-slide repair round adds another LLM call. A whole-deck `visual_repair_slides` on 20 slides is the expensive case at ≈ 40–90s per round — budget `max_iterations × 90s` for it, or keep calls slide-scoped and 300s is plenty |
-| Slides actually reviewed | `VISION_LLM_MAX_SLIDES` (default 15) caps whole-deck calls only; an explicit `slides` list is never truncated |
+| Tool timeout (Quick Apps `tool_defaults.timeout_seconds`, default 300s) | Rendering is ~1–2s for a few slides and ~4s for a 10-slide deck (only the layouts in use are rendered, however many the template carries); the rest is vision-model latency. A whole-deck `visual_repair_slides` is one parallel review (batches of `VISION_LLM_BATCH_SLIDES`, plus the coherence call), then one plan + one re-review per repair round on the changed slides only, at most `VISUAL_QA_MAX_ITERATIONS` (3) rounds. Measured: an 8-slide deck with three structural defects took ~90s for three rounds with a reasoning model. Raise the timeout to 600s for 20+ slide decks |
+| Slides actually reviewed | `VISION_LLM_MAX_SLIDES` (default 60) caps whole-deck calls only and anything past it is reported in `slides_not_reviewed`; an explicit `slides` list is never truncated |
 | Pod resources | LibreOffice renders in-pod: budget **1 CPU / 2Gi** with a writable `/tmp`. Small limits (e.g. 192Mi) get the renderer OOM-killed, which fails every QA call |
 
 `VISUAL_QA_ENFORCE=false` registers neither tool and turns slide QA off (the icon review in `render_svg_icon` is unaffected — it follows the model's presence). The reviewer model can be reached two ways: a direct OpenAI Responses-API endpoint with image input (Azure OpenAI included), or as a DIAL Core deployment via `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` — see the `VISION_LLM_*` variables. Cost note: each inspect is one render plus one LLM call; each repair round adds a second LLM call.

@@ -68,22 +68,27 @@ def register_visual_tools(app: FastMCP, presentations):
         focus: Optional[str] = None,
         reference_presentation_id: Optional[str] = None,
     ) -> Dict:
-        """Render slides and have a vision model review them for template
-        fidelity and visible errors (overflowing or clipped text, overlaps,
-        elements off the slide, unfilled placeholders, broken charts).
+        """Report what is wrong with slides, without changing anything.
+        Prefer visual_repair_slides, which runs the same review and then
+        fixes what it can.
+
+        The review checklist is complete and fixed server-side: blank or
+        misplaced content, hidden text, overflow and overlap (text, charts,
+        tables, diagrams), legibility, broken characters, charts, pictures,
+        alignment, brand fidelity — and, for the whole deck, the deck's
+        story: agenda vs. actual sections, content on the wrong slide,
+        contradictory figures, order.
 
         slides: 1-based slide numbers to review, e.g. [3] or [1,2,3]. Omit to
-        review the whole deck. Inspecting the one slide you just built is
-        cheap and precise; inspect as often as you like.
-        focus: extra instruction for the reviewer, e.g. "check the chart
-        labels are legible".
+        review the whole deck (the only scope that runs the story review).
+        focus: optional extra instruction, added on top of the checklist —
+        leave it out unless the user asked for something specific.
         reference_presentation_id: a template deck to compare against for
-        brand fidelity (whole-deck review only).
+        brand fidelity.
 
-        Returns {"passed": bool, "issues": [{"slide", "severity",
-        "description", "suggested_fix"}]}. Slide numbers in issues are
-        absolute deck positions. This tool only reports — use
-        visual_repair_slides, or your own editing tools, to fix what it finds.
+        Returns {"passed", "issues": [{"slide", "severity", "category",
+        "element", "description", "suggested_fix"}], "slides_reviewed",
+        "checks"}. Slide numbers are absolute deck positions.
         """
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
@@ -109,7 +114,8 @@ def register_visual_tools(app: FastMCP, presentations):
             return {"error": f"Visual inspection failed: {str(e)}"}
 
         # Only a clean review of the *whole* deck clears it for export.
-        if verdict.get("passed") is True and not numbers:
+        if verdict.get("passed") is True and not numbers \
+                and not verdict.get("slides_not_reviewed"):
             presentations.clear_dirty(presentation_id)
         verdict["scope"] = numbers or "deck"
         return verdict
@@ -125,22 +131,35 @@ def register_visual_tools(app: FastMCP, presentations):
         focus: Optional[str] = None,
         max_iterations: Optional[int] = None,
     ) -> Dict:
-        """Inspect the selected slides and fix what the review finds, then
-        re-inspect — repeating until they pass or the iteration budget runs
-        out. Repairs are made server-side with a fixed set of validated
-        operations (move, resize, font size, set text, word wrap, delete) and
-        never touch slides outside `slides`.
+        """Review slides and fix what the review finds, then re-review —
+        repeating until they pass or the iteration budget runs out.
 
-        slides: 1-based slide numbers to repair; omit for the whole deck.
-        focus: extra instruction for the reviewer.
-        max_iterations: inspect/repair rounds for this call (default
-        VISUAL_QA_MAX_ITERATIONS, normally 10). Lower it for a quick pass on
-        a single slide.
+        The review checklist is complete and fixed server-side (see
+        visual_inspect_slides); you do not need to say what to look for.
+        Called without `slides` it also reviews the deck's story — agenda
+        vs. actual sections, content built on the wrong slide, hidden text,
+        contradictory figures — and can fix those too: repairs move shapes
+        between slides, restack, delete, clear or rewrite text, resize,
+        refit, recolour, fix tables and charts, and reorder slides, all
+        through validated operations. It never invents content.
 
-        Returns {"passed", "iterations", "repair_rounds", "issues"} — with
-        "issues" listing what could not be resolved. A false "passed" is a
-        report, not a request to retry the same call: either edit the slide
-        content yourself and inspect again, or tell the user what remains.
+        slides: 1-based slide numbers to repair; omit for the whole deck
+        (recommended once the deck is built). A scoped call never touches
+        slides outside `slides`.
+        focus: optional extra instruction, added on top of the checklist.
+        max_iterations: reviews for this call, including the first (default
+        VISUAL_QA_MAX_ITERATIONS, normally 3); values below 2 are raised to 2.
+
+        A round that makes a slide worse is undone on that slide (the round
+        then lists it under "reverted_slides"), so the deck you get back is
+        the best version of each slide, not the last attempt.
+
+        Returns {"passed", "iterations", "repair_rounds" (each with the
+        "changes" it made), "issues" (blocking issues left), "minor_issues",
+        "action_required" (what only you can fix — usually missing content:
+        build it with the editing tools, then call this again on those
+        slides), "slides_reviewed", "checks"}. A false "passed" is a report,
+        not a request to retry the same call.
         """
         pres, numbers, error = _resolve(presentation_id, slides)
         if error:
@@ -162,7 +181,8 @@ def register_visual_tools(app: FastMCP, presentations):
                          _scope(numbers), type(e).__name__, e)
             return {"error": f"Visual repair failed: {str(e)}"}
 
-        if outcome.get("passed") and not numbers:
+        if outcome.get("passed") and not numbers \
+                and not outcome.get("slides_not_reviewed"):
             presentations.clear_dirty(presentation_id)
         outcome["scope"] = numbers or "deck"
         return outcome

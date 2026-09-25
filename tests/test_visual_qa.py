@@ -268,5 +268,69 @@ class TestSubsetDeckBytes(unittest.TestCase):
         self.assertEqual(len(pres.slides), 34)
 
 
+class TestLayoutPruning(unittest.TestCase):
+    DEMO = Path(__file__).resolve().parent.parent / \
+        "mcp_all_tools_templates_effects_demo.pptx"
+
+    def test_subset_keeps_only_layouts_and_masters_in_use(self):
+        from pptx import Presentation
+        import io
+        import visual_qa
+        pres = Presentation(str(self.DEMO))
+        subset = Presentation(io.BytesIO(
+            visual_qa._subset_deck_bytes(pres, [3])))
+        layouts = [l for m in subset.slide_masters for l in m.slide_layouts]
+        self.assertEqual(len(layouts), 1)
+        self.assertEqual(len(subset.slide_masters), 1)
+        self.assertEqual(layouts[0].name, pres.slides[2].slide_layout.name)
+        # The live deck keeps every layout it had.
+        self.assertGreater(
+            sum(len(m.slide_layouts) for m in pres.slide_masters), 1)
+
+    def test_whole_deck_copy_keeps_every_slide(self):
+        from pptx import Presentation
+        import io
+        import visual_qa
+        pres = Presentation(str(self.DEMO))
+        copy = Presentation(io.BytesIO(visual_qa._subset_deck_bytes(pres)))
+        self.assertEqual(len(copy.slides), len(pres.slides))
+        used = {s.slide_layout.name for s in pres.slides}
+        kept = {l.name for m in copy.slide_masters for l in m.slide_layouts}
+        self.assertEqual(kept, used)
+
+    def test_pruned_render_is_pixel_identical(self):
+        import io
+        import shutil
+        from pptx import Presentation
+        if not (os.environ.get("SOFFICE_PATH") or shutil.which("soffice")):
+            self.skipTest("LibreOffice not installed")
+        import visual_qa
+        import pymupdf
+        pres = Presentation(str(self.DEMO))
+        raw_bytes = visual_qa._subset_deck_bytes_unpruned(
+            self._bytes(pres), [2, 5])
+        # LibreOffice's first conversion in a process can anti-alias a few
+        # glyphs differently from every later one — same input, different
+        # bytes — so warm it up and compare pixels with a small tolerance.
+        # A wrongly pruned layout or master loses a whole background or
+        # placeholder, which is far beyond it.
+        visual_qa.render_pptx_bytes_to_pngs(raw_bytes)
+        pruned = visual_qa._render_deck(pres, slides=[2, 5])
+        raw = visual_qa.render_pptx_bytes_to_pngs(raw_bytes)
+        self.assertEqual(len(pruned), len(raw))
+        for a, b in zip(pruned, raw):
+            pa, pb = pymupdf.Pixmap(a), pymupdf.Pixmap(b)
+            self.assertEqual((pa.width, pa.height), (pb.width, pb.height))
+            differing = sum(1 for x, y in zip(pa.samples, pb.samples)
+                            if x != y)
+            self.assertLess(differing / len(pa.samples), 0.02)
+
+    @staticmethod
+    def _bytes(pres):
+        import io
+        buf = io.BytesIO()
+        pres.save(buf)
+        return buf.getvalue()
+
 if __name__ == "__main__":
     unittest.main()

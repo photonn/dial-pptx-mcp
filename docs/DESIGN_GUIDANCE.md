@@ -259,14 +259,22 @@ Design quality comes out of the loop, not out of the first attempt:
 3. **Build one slide** — `duplicate_slide` the right template slide, then fill
    it (`manage_text`, `populate_placeholder`, `add_chart`,
    `add_image_from_dial_url`).
-4. **Look at it** with `visual_inspect_slides(slides=[n])`. Inspecting the one
-   slide you just built is cheap and precise, and catching a layout mistake now
-   is much cheaper than discovering it in all twelve copies later.
+4. **Check the first slide of each new layout** with
+   `visual_repair_slides(slides=[n])` — catching a layout mistake before you
+   copy it into twelve slides is worth one extra call. Don't check the others
+   one by one; step 6 covers them in a single pass.
 5. **Repeat** for the rest of the deck.
 6. **Validate the whole deck**: `validate_presentation` for structure, then
-   `visual_repair_slides` for appearance.
-7. **Read the text back** with `extract_presentation_text` — check for missing
-   sections, duplicated content, and template filler nobody replaced.
+   one `visual_repair_slides` call with no `slides` argument and no `focus`.
+   It reviews every slide and the deck's story — agenda against sections,
+   content on the wrong slide, blank slides, contradictions — and fixes what
+   it can. Don't call `visual_inspect_slides` before it.
+7. **Finish what only you can**: every `action_required` entry is content the
+   repair engine will not invent (a blank slide, a missing chart). Build it,
+   then `visual_repair_slides(slides=[...])` on just those slides. To remove
+   or relocate a single element use `manage_shape` (find its index with
+   `get_slide_info`); prefer editing an element in place to deleting and
+   re-adding it.
 8. **Export** with `export_presentation` and give the user the file URL.
 9. **Show your work**: `render_deck_summary_card` tiles the finished deck into
    one image. Attach it next to the file so the user can see what they got

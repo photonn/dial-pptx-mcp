@@ -30,6 +30,11 @@ __all__ = [
     "set_speaker_notes",
     "pin_inherited_geometry",
     "check_index",
+    "delete_shape",
+    "set_shape_z_order",
+    "move_shape_to_slide",
+    "reorder_slides",
+    "clear_shape_text",
 
     # Core utilities
     "safe_operation",
