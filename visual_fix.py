@@ -72,6 +72,13 @@ MAX_TEXT_CHARS = 4000
 FONT_PT_RANGE = (6, 96)
 POSITION_IN_RANGE = (-5.0, 60.0)
 SIZE_IN_RANGE = (0.05, 60.0)
+# A repair may not shrink a chart, table, picture or group below this share
+# of its current width or height in one operation. Planners "make room" for a
+# neighbouring caption by collapsing the chart into an illegible strip, and
+# the reviewer then reports the strip as a new, worse defect.
+MIN_GRAPHIC_SCALE = 0.5
+# Slack when judging whether a shape stays on the slide, in EMU (0.02in).
+ON_SLIDE_TOLERANCE = 18288
 HEX_COLOR = re.compile(r"^#?[0-9A-Fa-f]{6}$")
 AUTOFIT_MODES = {
     "shrink_text": MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE,
@@ -405,6 +412,15 @@ element. Growing text is not an improvement when it crowds neighbouring \
 elements or leaves no margin: prefer consistency with comparable elements on \
 the same slide, and never enlarge text just because there is room.
 
+Never make room by shrinking a chart, table or picture: it must stay \
+legible. Move or shorten the text around it instead, or move the text onto \
+free space; a resize below half of a chart's, table's or picture's current \
+width or height is rejected. Keep every shape inside the slide. Before moving \
+or resizing anything, check the destination box against the other shapes' \
+boxes in the structure above: a fix that lands on another element is a new \
+overlap. Change only what an issue names — a slide with no issue listed is \
+not yours to rearrange.
+
 For text that is not in a text box, use the operation that matches the \
 container. Table columns too narrow for their text: widen the column (and \
 narrow another so the table still fits) or shrink the table font. Table rows \
@@ -518,6 +534,42 @@ def _in_range(v, lo_hi):
     return isinstance(v, (int, float)) and lo_hi[0] <= v <= lo_hi[1]
 
 
+def _is_graphic(shape):
+    """Charts, tables, pictures and groups: content whose legibility depends
+    on its size, unlike a text box whose font can be refitted."""
+    if getattr(shape, "has_chart", False) or getattr(shape, "has_table", False):
+        return True
+    try:
+        kind = str(shape.shape_type or "")
+    except NotImplementedError:  # an autoshape python-pptx cannot classify
+        return False
+    return "PICTURE" in kind or "GROUP" in kind
+
+
+def _collapses_graphic(shape, width, height):
+    if not _is_graphic(shape):
+        return False
+    return (width < shape.width * MIN_GRAPHIC_SCALE
+            or height < shape.height * MIN_GRAPHIC_SCALE)
+
+
+def _on_slide(pres, left, top, width, height):
+    tol = ON_SLIDE_TOLERANCE
+    return (left >= -tol and top >= -tol
+            and left + width <= pres.slide_width + tol
+            and top + height <= pres.slide_height + tol)
+
+
+def _leaves_slide(pres, shape, box):
+    """True when a shape that sits inside the slide would end up (partly)
+    outside it. A shape that already bleeds off the edge — a full-bleed
+    picture, say — is the template's choice and is not held to this."""
+    current = (shape.left, shape.top, shape.width, shape.height)
+    if None in current or not _on_slide(pres, *current):
+        return False
+    return not _on_slide(pres, *box)
+
+
 def skip_reason_summary(skipped):
     """Count the distinct reasons a plan's operations were rejected, e.g.
     {"bad shape_index": 2}. Reported to the caller so a round that applied
@@ -596,24 +648,37 @@ def apply_repairs(pres, operations, allowed_slides=None):
                     skipped.append({"op": op, "reason": "position out of range"})
                     continue
                 ppt_utils.pin_inherited_geometry(shape)
-                shape.left = Inches(op["left_in"])
-                shape.top = Inches(op["top_in"])
+                box = (Inches(op["left_in"]), Inches(op["top_in"]),
+                       shape.width, shape.height)
+                if _leaves_slide(pres, shape, box):
+                    skipped.append({"op": op, "reason": "would leave the slide"})
+                    continue
+                shape.left, shape.top = box[0], box[1]
             elif kind == "resize_shape":
                 w, h = op.get("width_in"), op.get("height_in")
                 if w is None and h is None:
                     skipped.append({"op": op, "reason": "no dimensions"})
                     continue
+                # Validate both before touching either: a valid width
+                # followed by a bad height must not half-apply.
+                if w is not None and not _in_range(w, SIZE_IN_RANGE):
+                    skipped.append({"op": op, "reason": "width out of range"})
+                    continue
+                if h is not None and not _in_range(h, SIZE_IN_RANGE):
+                    skipped.append({"op": op, "reason": "height out of range"})
+                    continue
                 ppt_utils.pin_inherited_geometry(shape)
-                if w is not None:
-                    if not _in_range(w, SIZE_IN_RANGE):
-                        skipped.append({"op": op, "reason": "width out of range"})
-                        continue
-                    shape.width = Inches(w)
-                if h is not None:
-                    if not _in_range(h, SIZE_IN_RANGE):
-                        skipped.append({"op": op, "reason": "height out of range"})
-                        continue
-                    shape.height = Inches(h)
+                box = (shape.left, shape.top,
+                       Inches(w) if w is not None else shape.width,
+                       Inches(h) if h is not None else shape.height)
+                if _collapses_graphic(shape, box[2], box[3]):
+                    skipped.append({"op": op, "reason": "would shrink a chart, "
+                                    "table or picture by more than half"})
+                    continue
+                if _leaves_slide(pres, shape, box):
+                    skipped.append({"op": op, "reason": "would leave the slide"})
+                    continue
+                shape.width, shape.height = box[2], box[3]
             elif kind == "set_font_size":
                 if not _in_range(op.get("size_pt"), FONT_PT_RANGE):
                     skipped.append({"op": op, "reason": "font size out of range"})

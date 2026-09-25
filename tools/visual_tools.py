@@ -150,6 +150,10 @@ def register_visual_tools(app: FastMCP, presentations):
         max_iterations: reviews for this call, including the first (default
         VISUAL_QA_MAX_ITERATIONS, normally 3); values below 2 are raised to 2.
 
+        A round that makes a slide worse is undone on that slide (the round
+        then lists it under "reverted_slides"), so the deck you get back is
+        the best version of each slide, not the last attempt.
+
         Returns {"passed", "iterations", "repair_rounds" (each with the
         "changes" it made), "issues" (blocking issues left), "minor_issues",
         "action_required" (what only you can fix — usually missing content:

@@ -158,10 +158,11 @@ class TestPlaceholderGeometry(unittest.TestCase):
         self.assertEqual(self.shape.height, self.inherited[3])
 
     def test_moving_keeps_the_inherited_size(self):
-        self.apply({"op": "move_shape", "left_in": 2.0, "top_in": 3.0})
+        # The 9in body placeholder fits a 10in slide only near the left.
+        self.apply({"op": "move_shape", "left_in": 0.3, "top_in": 2.0})
         self.assert_complete()
         self.assertEqual((self.shape.left, self.shape.top),
-                         (Inches(2.0), Inches(3.0)))
+                         (Inches(0.3), Inches(2.0)))
         self.assertEqual((self.shape.width, self.shape.height),
                          self.inherited[2:])
 
@@ -658,6 +659,177 @@ class TestInspectAndRepairLoop(unittest.TestCase):
         outcome, calls = self._run([failing], [[]])  # planner returns nothing
         self.assertFalse(outcome["passed"])
         self.assertEqual(calls["review"], 1)  # no progress -> stop immediately
+
+
+def two_slide_deck():
+    """Slide 1: a text box and a chart; slide 2: a text box."""
+    pres = Presentation()
+    first = pres.slides.add_slide(pres.slide_layouts[6])
+    first.shapes.add_textbox(Inches(1), Inches(0.5), Inches(4), Inches(1)) \
+        .text_frame.text = "caption"
+    data = CategoryChartData()
+    data.categories = ["a", "b"]
+    data.add_series("s", (1, 2))
+    first.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1),
+                           Inches(2), Inches(6), Inches(4), data)
+    second = pres.slides.add_slide(pres.slide_layouts[6])
+    second.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)) \
+        .text_frame.text = "other"
+    return pres
+
+
+class TestGeometryGuards(unittest.TestCase):
+    def test_a_chart_cannot_be_collapsed(self):
+        pres = two_slide_deck()
+        chart = pres.slides[0].shapes[1]
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "resize_shape", "slide": 1, "shape_index": 1,
+             "height_in": 0.4}])
+        self.assertIn("more than half", result["skipped"][0]["reason"])
+        self.assertEqual(chart.height, Inches(4))
+        # A moderate shrink is still a legitimate fix.
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "resize_shape", "slide": 1, "shape_index": 1,
+             "height_in": 3.0}])
+        self.assertEqual(result["skipped"], [])
+        self.assertEqual(chart.height, Inches(3))
+
+    def test_text_can_shrink_freely(self):
+        pres = two_slide_deck()
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "resize_shape", "slide": 1, "shape_index": 0,
+             "height_in": 0.3}])
+        self.assertEqual(result["skipped"], [])
+
+    def test_a_shape_cannot_be_pushed_off_the_slide(self):
+        pres = two_slide_deck()
+        box = pres.slides[0].shapes[0]
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "move_shape", "slide": 1, "shape_index": 0,
+             "left_in": 8.0, "top_in": 0.5},
+            {"op": "resize_shape", "slide": 1, "shape_index": 0,
+             "width_in": 20.0}])
+        self.assertEqual([s["reason"] for s in result["skipped"]],
+                         ["would leave the slide"] * 2)
+        self.assertEqual((box.left, box.width), (Inches(1), Inches(4)))
+
+    def test_a_bleeding_shape_is_not_held_to_the_slide(self):
+        pres = two_slide_deck()
+        box = pres.slides[0].shapes[0]
+        box.left = Inches(-1)
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "move_shape", "slide": 1, "shape_index": 0,
+             "left_in": -0.5, "top_in": 0.5}])
+        self.assertEqual(result["skipped"], [])
+
+    def test_a_bad_height_does_not_half_apply_the_width(self):
+        pres = two_slide_deck()
+        box = pres.slides[0].shapes[0]
+        visual_fix.apply_repairs(pres, [
+            {"op": "resize_shape", "slide": 1, "shape_index": 0,
+             "width_in": 5.0, "height_in": 999}])
+        self.assertEqual(box.width, Inches(4))
+
+
+class TestRoundRollback(unittest.TestCase):
+    """The loop keeps the best version of each slide: a round that makes a
+    slide worse is undone on that slide, and only there."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ENV}
+        os.environ.update(ENV)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _run(self, pres, verdicts, plan, max_iterations=2):
+        def fake_render(p, max_slides=None, slides=None):
+            return [b"\x89PNG-fake"] * (len(slides) if slides
+                                          else len(p.slides))
+
+        with patch.object(visual_qa, "_render_deck", fake_render), \
+             patch.object(visual_qa.VisionLLM, "review",
+                          lambda s, i, p, timeout=None:
+                          dict(verdicts.pop(0))), \
+             patch.object(visual_fix, "plan_repairs",
+                          lambda *a, **k: plan):
+            return visual_qa.inspect_and_repair(
+                pres, max_iterations=max_iterations)
+
+    @staticmethod
+    def _issue(slide, severity="major", text="x"):
+        return {"slide": slide, "severity": severity, "description": text}
+
+    def test_a_slide_made_worse_is_rolled_back_and_the_rest_kept(self):
+        pres = two_slide_deck()
+        plan = [{"op": "move_shape", "slide": 1, "shape_index": 1,
+                 "left_in": 2.0, "top_in": 1.0},
+                {"op": "set_text", "slide": 2, "shape_index": 0,
+                 "text": "fixed"}]
+        verdicts = [
+            {"passed": False, "issues": [self._issue(1, text="caption"),
+                                         self._issue(2, text="typo")]},
+            # Slide 1 now has a critical overlap; slide 2 is clean.
+            {"passed": False, "issues": [self._issue(1, "critical",
+                                                     "chart over caption")]},
+        ]
+        outcome = self._run(pres, verdicts, plan)
+        chart = pres.slides[0].shapes[1]
+        self.assertEqual((chart.left, chart.top), (Inches(1), Inches(2)))
+        self.assertTrue(chart.has_chart)
+        self.assertEqual(pres.slides[1].shapes[0].text_frame.text, "fixed")
+        round_one = outcome["repair_rounds"][0]
+        self.assertEqual(round_one["reverted_slides"], [1])
+        self.assertEqual(round_one["operations_applied"], 1)
+        self.assertEqual(round_one["operations_reverted"], 1)
+        # The slide's verdict is the one that describes it again.
+        self.assertEqual([i["description"] for i in outcome["issues"]],
+                         ["caption"])
+
+    def test_an_improved_slide_is_kept(self):
+        pres = two_slide_deck()
+        plan = [{"op": "move_shape", "slide": 1, "shape_index": 1,
+                 "left_in": 2.0, "top_in": 2.5}]
+        verdicts = [
+            {"passed": False, "issues": [self._issue(1, "critical"),
+                                         self._issue(1)]},
+            {"passed": False, "issues": [self._issue(1)]},
+        ]
+        outcome = self._run(pres, verdicts, plan)
+        self.assertEqual(pres.slides[0].shapes[1].left, Inches(2))
+        self.assertNotIn("reverted_slides", outcome["repair_rounds"][0])
+
+    def test_a_cross_slide_move_is_undone_at_both_ends(self):
+        pres = two_slide_deck()
+        plan = [{"op": "move_shape_to_slide", "slide": 1, "shape_index": 0,
+                 "target_slide": 2}]
+        verdicts = [
+            {"passed": False, "issues": [self._issue(1)]},
+            # Slide 1 is fine now, but slide 2 got worse.
+            {"passed": False, "issues": [self._issue(2, "critical")]},
+        ]
+        outcome = self._run(pres, verdicts, plan)
+        self.assertEqual(len(pres.slides[0].shapes), 2)
+        self.assertEqual(len(pres.slides[1].shapes), 1)
+        self.assertEqual(outcome["repair_rounds"][0]["reverted_slides"], [1, 2])
+        self.assertEqual([i["slide"] for i in outcome["issues"]], [1])
+
+    def test_a_reorder_that_makes_things_worse_is_undone(self):
+        pres = two_slide_deck()
+        plan = [{"op": "reorder_slides", "order": [2, 1]}]
+        verdicts = [
+            {"passed": False, "issues": [self._issue(1)]},
+            {"passed": False, "issues": [self._issue(1, "critical"),
+                                         self._issue(2, "critical")]},
+        ]
+        outcome = self._run(pres, verdicts, plan, max_iterations=3)
+        self.assertEqual(pres.slides[0].shapes[0].text_frame.text, "caption")
+        self.assertEqual(outcome["repair_rounds"][0]["reverted_slides"], "all")
+        self.assertEqual([i["slide"] for i in outcome["issues"]], [1])
 
 
 class TestSkipReasonSummary(unittest.TestCase):

@@ -203,7 +203,7 @@ blocking issue left, never the model's flag — which it sets beside critical fi
 `move_shape_to_slide`, `reorder_slides` (applied last; returns `slides_reordered` so the loop restarts its scope),
 z-order, `clear_text` and `set_font_color`; the planner may not invent content and returns `author_actions` instead,
 surfaced as `action_required`. `apply_repairs` resolves shape indexes against a per-slide snapshot taken before any op —
-resolving against the live slide let a delete shift every later index on that slide onto the wrong shape. The shape
+resolving against the live slide let a delete shift every later index on that slide onto the wrong shape. Each re-review judges the slides the previous round touched against their pre-round verdicts (`_judge_round`): a slide that scored worse is rolled back by restoring the pre-round deck bytes and replaying the round's other operations — exact, because operations address the pre-round deck and are deterministic — and a cross-slide move is dropped at both ends. The restore refills the existing `Presentation` object's `__dict__` (`_restore_deck`) rather than replacing it, because the store and every caller hold that object. `apply_repairs` also refuses shrinking a chart/table/picture/group below `MIN_GRAPHIC_SCALE` and moving an on-slide shape off the slide — the planner's habitual way of "making room" was to crush the chart. The shape
 primitives (`delete_shape`, `set_shape_z_order`, `move_shape_to_slide`, `reorder_slides` in `utils/slide_utils.py`)
 also back the `manage_shape` tool; `move_shape_to_slide` re-relates a picture's or chart's part on the target and
 renumbers shape ids, and moves a placeholder's *text* into the target's matching placeholder rather than the element.

@@ -22,6 +22,7 @@ The LLM endpoint speaks the OpenAI Responses API with image input
 """
 import base64
 import contextvars
+import io
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ import time
 from pathlib import Path
 
 import httpx
+from pptx import Presentation
 
 import deck_review
 import fonts
@@ -894,7 +896,9 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     via LLM-planned whitelisted operations (visual_fix.py) and review again,
     up to VISUAL_QA_MAX_ITERATIONS (default 3) reviews. Stops early once a
     repair round fails to reduce the blocking-issue count: the operations
-    either fixed it or they cannot.
+    either fixed it or they cannot. A round that makes a slide worse is
+    rolled back on that slide (_judge_round), so the deck left behind holds
+    the best version of each slide seen, not the last attempt.
 
     slides: 1-based slide numbers to work on; None means the whole deck.
     Repairs are confined to the reviewed slides — issues reported against
@@ -940,28 +944,58 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     # coherence review is one cheap text call and re-runs every round:
     # a move or an agenda rewrite changes the story on several slides.
     review_scope = initial_scope
-    images_by_slide = {}
-    carried, found, reviewed = [], [], set()
+    # The latest accepted verdict per slide. A slide keeps its issues until
+    # it is reviewed again, which is how a blocking issue on a slide no
+    # operation reached stays unresolved without being re-inspected.
+    images_by_slide, visual_by_slide, coherence_issues = {}, {}, []
+    reviewed = set()
+    # The round whose outcome the next review judges: the deck as it was
+    # before that round, the operations it applied and the per-slide state
+    # to fall back on. See _judge_round.
+    pending = None
     for iteration in range(1, max_iterations + 1):
         round_started = time.monotonic()
         deck_images = _render_deck(pres, None, review_scope)
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = review_scope or list(range(1, len(deck_images) + 1))
-        images_by_slide.update(zip(image_slides, deck_images))
-        reviewed.update(image_slides)
         visual, coherence = _review(llm, pres, deck_images, image_slides,
                                     focus, risky_fonts,
                                     coherence=use_coherence)
-        in_scope = [i for i in visual["issues"]
-                    if not slides or i.get("slide") in slides]
-        found = in_scope + (coherence["issues"] if coherence else [])
+        new_visual = {n: [] for n in image_slides}
+        for issue in visual["issues"]:
+            if not slides or issue.get("slide") in slides:
+                new_visual.setdefault(issue.get("slide"), []).append(issue)
+        new_state = {"visual": new_visual,
+                     "images": dict(zip(image_slides, deck_images)),
+                     "coherence": coherence["issues"] if coherence else []}
+        reverted = []
+        if pending:
+            reverted, stop = _judge_round(pres, pending, new_state, slides)
+            if stop:
+                # A reorder made the deck worse and was undone as a whole:
+                # nothing reviewed this round describes the deck any more.
+                visual_by_slide = pending["visual"]
+                images_by_slide = pending["images"]
+                coherence_issues = pending["coherence"]
+                break
+        visual_by_slide.update(new_state["visual"])
+        images_by_slide.update(new_state["images"])
+        coherence_issues = new_state["coherence"]
+        reviewed.update(image_slides)
+
+        found = _all_issues(visual_by_slide, coherence_issues)
         issues = blocking_issues(found)
-        blocking_total = len(issues) + len(carried)
+        # What this round can act on: slides it just reviewed (and did not
+        # just roll back — that fix was tried) plus the deck's story.
+        actionable = [i for i in issues if i.get("check") == "coherence"
+                      or (i.get("slide") in image_slides
+                          and i.get("slide") not in reverted)]
         logger.info("qa_round iteration=%d/%d slides=%d issues=%d blocking=%d "
-                    "carried=%d coherence_issues=%s duration_ms=%d", iteration,
-                    max_iterations, len(deck_images), len(found), len(issues),
-                    len(carried),
+                    "actionable=%d reverted=%d coherence_issues=%s "
+                    "duration_ms=%d", iteration, max_iterations,
+                    len(deck_images), len(found), len(issues),
+                    len(actionable), len(reverted),
                     len(coherence["issues"]) if coherence else "-",
                     int((time.monotonic() - round_started) * 1000))
         if logger.isEnabledFor(logging.DEBUG):
@@ -971,34 +1005,35 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                              issue.get("check"), issue.get("slide"),
                              issue.get("severity"),
                              flatten(str(issue.get("description", ""))[:200]))
-        if not carried and not issues and visual["passed"] is not None:
+        if not issues and visual["passed"] is not None:
             logger.info("qa_loop_passed iterations=%d repair_rounds=%d "
                         "duration_ms=%d", iteration, len(repair_rounds),
                         int((time.monotonic() - loop_started) * 1000))
             return _outcome(True, iteration, repair_rounds, [], found,
                             reviewed, checks, not_reviewed, author_actions)
-        if repair_rounds and blocking_total >= repair_rounds[-1]["issues_found"]:
-            # The last repair round applied operations but left as many
-            # blocking issues as before: more rounds of the same operations
-            # will not converge. Hand it back instead of looping.
+        if repair_rounds and len(issues) >= repair_rounds[-1]["issues_found"]:
+            # The last repair round left as many blocking issues as before:
+            # more rounds of the same operations will not converge. Hand it
+            # back instead of looping.
             logger.warning("qa_loop_stop reason=no_improvement iteration=%d "
-                           "blocking=%d", iteration, blocking_total)
+                           "blocking=%d", iteration, len(issues))
             break
-        if iteration == max_iterations or not issues:
+        if iteration == max_iterations or not actionable:
             # Out of budget, or nothing actionable (e.g. unparseable review,
-            # or only carried issues left)
+            # or only unreached issues left)
             logger.warning("qa_loop_stop reason=%s iteration=%d",
                            "budget_exhausted" if iteration == max_iterations
                            else "no_actionable_issues", iteration)
             break
         author_actions = []
         plan = visual_fix.plan_repairs(
-            llm, issues, pres, list(images_by_slide.values()),
+            llm, actionable, pres, list(images_by_slide.values()),
             list(images_by_slide.keys()), author_actions=author_actions)
+        before = _deck_bytes(pres)
         result = visual_fix.apply_repairs(pres, plan, allowed_slides=slides)
         round_report = {
             "iteration": iteration,
-            "issues_found": blocking_total,
+            "issues_found": len(issues),
             "operations_applied": len(result["applied"]),
             "operations_skipped": len(result["skipped"]),
         }
@@ -1018,19 +1053,23 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
                            "operations_planned=%d operations_skipped=%d",
                            iteration, len(plan), len(result["skipped"]))
             break  # no progress is possible; stop burning inspections
-        if result.get("slides_reordered"):
-            # Every slide number just changed: nothing rendered or carried
+        pending = {"deck": before, "applied": result["applied"],
+                   "reordered": bool(result.get("slides_reordered")),
+                   "touched": visual_fix.touched_slides(result["applied"]),
+                   "report": round_report,
+                   "visual": dict(visual_by_slide),
+                   "images": dict(images_by_slide),
+                   "coherence": list(coherence_issues)}
+        if pending["reordered"]:
+            # Every slide number just changed: nothing rendered or reviewed
             # still points at the right slide, so start over on the whole scope.
-            images_by_slide.clear()
-            carried = []
+            images_by_slide, visual_by_slide = {}, {}
             review_scope = initial_scope
-            continue
-        touched = visual_fix.touched_slides(result["applied"])
-        carried += [i for i in issues if i.get("check") != "coherence"
-                    and i.get("slide") not in touched]
-        review_scope = touched
+        else:
+            review_scope = pending["touched"]
 
-    remaining = blocking_issues(found) + carried
+    found = _all_issues(visual_by_slide, coherence_issues)
+    remaining = blocking_issues(found)
     out = _outcome(False, len(repair_rounds) + 1, repair_rounds, remaining,
                    found, reviewed, checks, not_reviewed, author_actions)
     if repair_rounds and not repair_rounds[-1]["operations_applied"] \
@@ -1063,6 +1102,115 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         if key in visual:
             out[key] = visual[key]
     return out
+
+
+# How much a blocking issue weighs when a round is judged slide by slide: a
+# round that trades one major issue for a critical one made the slide worse.
+_SEVERITY_WEIGHT = {"critical": 3}
+
+
+def _all_issues(visual_by_slide, coherence_issues):
+    return [i for n in sorted(visual_by_slide, key=str)
+            for i in visual_by_slide[n]] + list(coherence_issues)
+
+
+def _slide_scores(issues):
+    scores = {}
+    for issue in blocking_issues(issues):
+        weight = _SEVERITY_WEIGHT.get(str(issue.get("severity", "")).lower(), 2)
+        scores[issue.get("slide")] = scores.get(issue.get("slide"), 0) + weight
+    return scores
+
+
+def _deck_bytes(pres):
+    buf = io.BytesIO()
+    pres.save(buf)
+    return buf.getvalue()
+
+
+def _restore_deck(pres, data):
+    """Put pres back to the state saved in data, in place. The store and
+    every caller hold this object, so it is refilled rather than replaced:
+    a python-pptx Presentation is a proxy whose whole state (element, part,
+    lazily cached collections) lives in its instance __dict__."""
+    fresh = Presentation(io.BytesIO(data))
+    pres.__dict__.clear()
+    pres.__dict__.update(fresh.__dict__)
+
+
+def _judge_round(pres, pending, new_state, slides):
+    """Keep what the last repair round improved and undo what it made worse.
+
+    The reviewer judges each slide the round touched against that slide's
+    verdict before the round. A planner that makes room for a caption by
+    crushing the chart beside it scores worse, and without this the loop
+    would hand back the crushed chart — the last round's deck is otherwise
+    what the caller gets, whether or not it was an improvement.
+
+    A worse slide is rolled back by restoring the pre-round deck and
+    replaying the round's other operations, which is exact: the operations
+    address the pre-round deck and are deterministic. Operations reaching
+    a rolled-back slide go too, along with every other slide they touch (a
+    move has two ends). Rolled-back slides take their earlier verdict and
+    image back in new_state. A reorder renumbers every slide, so it is
+    judged on the whole deck and undone whole.
+
+    Returns (reverted slide numbers, stop): stop is True when the whole round
+    was undone and the loop should end on the earlier state."""
+    import visual_fix
+
+    before = _slide_scores(_all_issues(pending["visual"], pending["coherence"]))
+    after = _slide_scores(_all_issues(new_state["visual"],
+                                      new_state["coherence"]))
+    report = pending["report"]
+    if pending["reordered"]:
+        if sum(after.values()) <= sum(before.values()):
+            return [], False
+        _restore_deck(pres, pending["deck"])
+        report.update(operations_applied=0,
+                      operations_reverted=len(pending["applied"]),
+                      reverted_slides="all", changes=[])
+        logger.warning("qa_round_reverted iteration=%d scope=deck "
+                       "operations=%d", report["iteration"],
+                       len(pending["applied"]))
+        return [], True
+
+    reverted = {n for n in pending["touched"]
+                if after.get(n, 0) > before.get(n, 0)}
+    if not reverted:
+        return [], False
+    applied = pending["applied"]
+    while True:
+        dropped = [op for op in applied
+                   if reverted & set(visual_fix.touched_slides([op]))]
+        grown = reverted.union(*(visual_fix.touched_slides([op])
+                                 for op in dropped))
+        if grown == reverted:
+            break
+        reverted = grown
+    dropped_ids = {id(op) for op in dropped}
+    kept = [op for op in applied if id(op) not in dropped_ids]
+    _restore_deck(pres, pending["deck"])
+    if kept:
+        visual_fix.apply_repairs(pres, kept, allowed_slides=slides)
+    for n in reverted:
+        new_state["visual"][n] = pending["visual"].get(n, [])
+        if n in pending["images"]:
+            new_state["images"][n] = pending["images"][n]
+        else:
+            new_state["images"].pop(n, None)
+    new_state["coherence"] = (
+        [i for i in new_state["coherence"] if i.get("slide") not in reverted]
+        + [i for i in pending["coherence"] if i.get("slide") in reverted])
+    report.update(operations_applied=len(kept),
+                  operations_reverted=len(dropped),
+                  reverted_slides=sorted(reverted),
+                  changes=visual_fix.describe_changes(kept))
+    logger.warning("qa_round_reverted iteration=%d slides=%s operations=%d "
+                   "kept=%d", report["iteration"],
+                   ",".join(map(str, sorted(reverted))), len(dropped),
+                   len(kept))
+    return sorted(reverted), False
 
 
 def _outcome(passed, iterations, repair_rounds, remaining, found, reviewed,
