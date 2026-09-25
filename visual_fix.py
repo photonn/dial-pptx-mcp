@@ -868,6 +868,13 @@ def apply_repairs(pres, operations, allowed_slides=None):
                         or (top is not None and not _in_range(top, POSITION_IN_RANGE)):
                     skipped.append({"op": op, "reason": "position out of range"})
                     continue
+                if not shape.is_placeholder and _leaves_slide(
+                        pres, shape,
+                        (Inches(left) if left is not None else shape.left,
+                         Inches(top) if top is not None else shape.top,
+                         shape.width, shape.height)):
+                    skipped.append({"op": op, "reason": "would leave the slide"})
+                    continue
                 shapes_of(target)  # snapshot the target before it grows
                 try:
                     new_index = ppt_utils.move_shape_to_slide(
@@ -878,10 +885,18 @@ def apply_repairs(pres, operations, allowed_slides=None):
                 if not shape.is_placeholder:  # a placeholder stays, emptied
                     gone.add(id(shape))
                 moved = slides[target - 1].shapes[new_index]
-                if left is not None:
-                    moved.left = Inches(left)
-                if top is not None:
-                    moved.top = Inches(top)
+                if left is not None or top is not None:
+                    # A placeholder's text lands in the target's own
+                    # placeholder, whose box is only known now; it may
+                    # inherit its geometry, so pin before editing it.
+                    ppt_utils.pin_inherited_geometry(moved)
+                    box = (Inches(left) if left is not None else moved.left,
+                           Inches(top) if top is not None else moved.top,
+                           moved.width, moved.height)
+                    if _leaves_slide(pres, moved, box):
+                        op["position_ignored"] = "would leave the slide"
+                    else:
+                        moved.left, moved.top = box[0], box[1]
             else:
                 skipped.append({"op": op, "reason": f"unknown op '{kind}'"})
                 continue

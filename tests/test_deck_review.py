@@ -311,6 +311,20 @@ class TestCoherenceInTheLoop(EnvCase):
             outcome = visual_qa.inspect_and_repair(pres)
         self.assertTrue(outcome["passed"])
 
+    def test_an_unparseable_coherence_verdict_is_not_a_clean_story(self):
+        """parse_verdict turns garbage into passed=None with no issues; that
+        must not be reported as a story review that found nothing."""
+        pres = titled_deck(["A", "B", "C"])
+        fake_review, _ = self._script(
+            visual=[{"passed": True, "issues": []}],
+            coherence=[{"passed": None, "issues": []}])
+        with patch.object(visual_qa, "_render_deck", return_value=[b"png"] * 3), \
+             patch.object(visual_qa.VisionLLM, "review", fake_review):
+            outcome = visual_qa.inspect_and_repair(pres)
+            verdict = visual_qa.inspect_presentation(pres)
+        self.assertEqual(outcome["checks"], ["visual"])
+        self.assertEqual(verdict["checks"], ["visual"])
+
     def test_scoped_calls_skip_the_story_review(self):
         pres = titled_deck(["A", "B", "C"])
         fake_review, calls = self._script(
@@ -362,6 +376,15 @@ class TestNewRepairOperations(unittest.TestCase):
             {"op": "move_shape_to_slide", "slide": 1, "shape_index": 0,
              "target_slide": 3}], allowed_slides=[1])
         self.assertEqual(result["skipped"][0]["reason"], "slide out of scope")
+
+    def test_move_to_slide_keeps_the_shape_on_the_target(self):
+        pres = self._deck()
+        before = len(pres.slides[0].shapes)
+        result = visual_fix.apply_repairs(pres, [
+            {"op": "move_shape_to_slide", "slide": 1, "shape_index": before - 1,
+             "target_slide": 2, "left_in": 9.5, "top_in": 1.0}])
+        self.assertEqual(result["skipped"][0]["reason"], "would leave the slide")
+        self.assertEqual(len(pres.slides[0].shapes), before)
 
     def test_reorder_runs_last_and_is_flagged(self):
         pres = self._deck()

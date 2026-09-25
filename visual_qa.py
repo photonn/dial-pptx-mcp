@@ -817,6 +817,11 @@ def _review(llm, pres, images, image_slides, focus, risky_fonts,
     if coherence_future is not None:
         try:
             coherence_verdict = coherence_future.result()
+            if coherence_verdict.get("passed") is None:
+                # Unparseable: an empty issue list here would read as "the
+                # story checks out". Degrade to the visual review, as for
+                # a failed call.
+                raise VisualQAError("coherence verdict unparseable")
             valid = range(1, len(pres.slides) + 1)
             coherence_verdict["issues"] = [
                 dict(i, check="coherence")
@@ -962,6 +967,8 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         visual, coherence = _review(llm, pres, deck_images, image_slides,
                                     focus, risky_fonts,
                                     coherence=use_coherence)
+        # Report the story review as run only when it produced a verdict.
+        checks = ["visual"] + (["coherence"] if coherence else [])
         new_visual = {n: [] for n in image_slides}
         for issue in visual["issues"]:
             if not slides or issue.get("slide") in slides:
