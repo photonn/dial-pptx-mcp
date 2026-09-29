@@ -31,6 +31,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pptx.util import Inches
 
+from layout_space import ICON_NAME_PREFIX
 from logging_utils import get_logger
 from state import short_id
 
@@ -302,6 +303,14 @@ def register_icon_tools(app: FastMCP, presentations, icons=None):
         _place(pic, int(Inches(left)), int(Inches(top)), int(Inches(size)),
                int(Inches(size)), "contain", int(pres.slide_width),
                int(pres.slide_height))
+        # The concept travels with the picture: as its name, which is how
+        # deck_review and layout_space recognise an icon and what it is meant
+        # to show (a reviewer can then catch a shield on an EBITDA figure),
+        # and as alt text, which is what a screen reader announces.
+        concept = (meta.get("concept") or "").strip()
+        pic.name = f"{ICON_NAME_PREFIX}{concept or 'icon'}"[:120]
+        if concept:
+            pic._element.nvPicPr.cNvPr.set("descr", concept[:250])
 
         logger.info("icon_placed presentation_id=%s slide=%d icon_id=%s "
                     "concept=%s", short_id(presentation_id), slide_index,

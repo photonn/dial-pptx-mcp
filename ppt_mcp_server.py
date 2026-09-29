@@ -187,6 +187,8 @@ def add_shape_direct(slide, shape_type: str, left: float, top: float, width: flo
     shape_type_map = {
         'rectangle': 1,              # RECTANGLE
         'rounded_rectangle': 5,      # ROUNDED_RECTANGLE
+        'chevron': 52,               # CHEVRON (process steps)
+        'pentagon_arrow': 51,        # PENTAGON (home plate / first process step)
         'oval': 9,                   # OVAL
         'diamond': 4,                # DIAMOND
         'triangle': 7,               # ISOSCELES_TRIANGLE

@@ -5,10 +5,29 @@ Handles tables, shapes, and charts.
 from typing import Dict, List, Optional, Any
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pptx.enum.text import MSO_ANCHOR
+from pptx.oxml.ns import qn
+from pptx.util import Inches
 import utils as ppt_utils
 from logging_utils import get_logger
 
 logger = get_logger("tools.structural")
+
+def _drop_shadow(shape):
+    """No shadow: an empty a:effectLst on the shape, and the style's
+    effectRef pointed at the theme's empty effect style. The first alone is
+    what the spec says is enough; LibreOffice still draws the style's shadow,
+    and visual QA renders through LibreOffice."""
+    shape.shadow.inherit = False
+    style = shape._element.find(qn("p:style"))
+    if style is not None:
+        ref = style.find(qn("a:effectRef"))
+        if ref is not None:
+            ref.set("idx", "0")
+
+
+_ANCHORS = {"top": MSO_ANCHOR.TOP, "middle": MSO_ANCHOR.MIDDLE,
+            "bottom": MSO_ANCHOR.BOTTOM}
 
 
 def register_structural_tools(app: FastMCP, presentations: Dict, get_current_presentation_id, validate_parameters, is_positive, is_non_negative, is_in_range, is_valid_rgb, add_shape_direct):
@@ -235,9 +254,29 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
         text: Optional[str] = None,  # Add text to shape
         font_size: Optional[int] = None,
         font_color: Optional[List[int]] = None,
+        font_name: Optional[str] = None,
+        bold: Optional[bool] = None,
+        italic: Optional[bool] = None,
+        alignment: Optional[str] = None,
+        vertical_alignment: Optional[str] = None,
+        text_margin: Optional[float] = None,
+        shadow: bool = False,
+        no_fill: bool = False,
         presentation_id: Optional[str] = None
     ) -> Dict:
-        """Add an auto shape to a slide with enhanced options."""
+        """Add an auto shape to a slide with enhanced options.
+
+        A filled shape is drawn flat: no outline unless line_color is given,
+        and no shadow unless shadow=True — templates' default shape style
+        adds both, which is what makes generated cards look unlike the
+        template's own. text may hold several lines separated by "\n" (one
+        paragraph each); style it with font_size, font_color, font_name,
+        bold, italic, alignment ("left"/"center"/"right") and
+        vertical_alignment ("top"/"middle"/"bottom"); text_margin is the
+        inner padding in inches. This makes a finished card, tile, badge or
+        header box in one call — no separate text box stacked on top.
+        no_fill=True draws only the outline (give line_color and line_width):
+        rings, frames and arcs over a coloured background."""
         pres_id = presentation_id if presentation_id is not None else get_current_presentation_id()
         
         if pres_id is None or pres_id not in presentations:
@@ -266,15 +305,35 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
                     line_color=tuple(line_color) if line_color else None,
                     line_width=line_width
                 )
+            if no_fill:
+                shape.fill.background()
+            elif fill_color and not line_color:
+                shape.line.fill.background()
+            if not shadow:
+                _drop_shadow(shape)
             
             # Add text to shape if provided
             if text and hasattr(shape, 'text_frame'):
-                shape.text_frame.text = text
-                if font_size or font_color:
+                frame = shape.text_frame
+                frame.text = text
+                frame.word_wrap = True
+                if text_margin is not None:
+                    margin = Inches(max(0.0, text_margin))
+                    frame.margin_left = frame.margin_right = margin
+                    frame.margin_top = frame.margin_bottom = margin
+                anchor = _ANCHORS.get((vertical_alignment or "").lower())
+                if anchor is not None:
+                    frame.vertical_anchor = anchor
+                if any(v is not None for v in (font_size, font_color, font_name,
+                                               bold, italic, alignment)):
                     ppt_utils.format_text(
-                        shape.text_frame,
+                        frame,
                         font_size=font_size,
-                        color=tuple(font_color) if font_color else None
+                        font_name=font_name,
+                        bold=bold,
+                        italic=italic,
+                        color=tuple(font_color) if font_color else None,
+                        alignment=(alignment or "").lower() or None
                     )
             
             return {
@@ -312,9 +371,22 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
         x_axis_title: Optional[str] = None,
         y_axis_title: Optional[str] = None,
         color_scheme: Optional[str] = None,
+        font_size: Optional[int] = None,
+        number_format: Optional[str] = None,
+        value_axis_min: Optional[float] = None,
+        show_value_axis: bool = True,
+        show_gridlines: bool = True,
         presentation_id: Optional[str] = None
     ) -> Dict:
         """Add a chart to a slide with comprehensive formatting options.
+
+        font_size sets every chart text (ticks, data labels, legend) in pt.
+        number_format is the data-label format, e.g. '#,##0', '0.0"%"',
+        '"€"#,##0"m"'. Bar, column and area charts of non-negative data start
+        their value axis at 0 unless value_axis_min says otherwise — an axis
+        starting at 3,900 turns a 6% rise into a doubling. With data labels
+        on, show_value_axis=False and show_gridlines=False give the clean
+        labelled-bars look.
 
         x_axis_title labels the CATEGORY axis and y_axis_title labels the
         VALUE axis, whatever the chart's orientation — the names are not
@@ -405,6 +477,11 @@ def register_structural_tools(app: FastMCP, presentations: Dict, get_current_pre
                 y_axis_title=y_axis_title,
                 color_scheme=color_scheme
             )
+            ppt_utils.style_chart_values(
+                chart, chart_type, series_values, font_size=font_size,
+                number_format=number_format, value_axis_min=value_axis_min,
+                show_value_axis=show_value_axis,
+                show_gridlines=show_gridlines)
             
             return {
                 "message": f"Added {chart_type} chart to slide {slide_index}",

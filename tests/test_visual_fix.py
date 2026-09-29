@@ -257,11 +257,18 @@ class TestTableAndChartRepairs(unittest.TestCase):
     def test_font_size_applies_to_table_and_chart(self):
         result = self.apply(
             {"op": "set_font_size", "slide": 1, "shape_index": 0, "size_pt": 10},
-            {"op": "set_font_size", "slide": 1, "shape_index": 1, "size_pt": 9})
+            {"op": "set_font_size", "slide": 1, "shape_index": 1, "size_pt": 11})
         self.assertEqual(len(result["applied"]), 2)
         cell = self.table.cell(0, 0).text_frame.paragraphs[0]
         self.assertEqual(cell.font.size, Pt(10))
-        self.assertEqual(self.chart.font.size, Pt(9))
+        self.assertEqual(self.chart.font.size, Pt(11))
+
+    def test_font_size_below_the_floor_is_refused(self):
+        result = self.apply(
+            {"op": "set_font_size", "slide": 1, "shape_index": 1, "size_pt": 8})
+        self.assertEqual(result["applied"], [])
+        self.assertIn("below minimum font size",
+                      result["skipped"][0]["reason"])
 
     def test_data_labels_and_legend(self):
         self.apply(

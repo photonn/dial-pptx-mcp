@@ -117,6 +117,13 @@ rendered image: visual repair can only move or delete a picture. **Address value
 `chart.value_axis` returns the *second* `valAx` when a chart has two (it assumes a scatter chart), so titling "the
 value axis" puts the left axis' title on the right-hand one.
 
+`add_chart` starts bar/column/area value axes at zero for non-negative data (`style_chart_values`) — both renderers
+auto-scale, and a 4,059 vs 4,296 pair came out with the axis at 3,900 — and `format_chart` switches data labels on at
+the *plot*: the upstream code set a non-existent series attribute inside a blanket `except`, so labels were never
+shown. `add_shape` draws filled shapes flat (no outline, no shadow — the template's default shape style adds both, and
+LibreOffice needs the style's `effectRef` zeroed besides the empty `a:effectLst`) and styles its own text, so a card is
+one call.
+
 `add_chart`'s `categories` argument means something different for `scatter`, the one type with no category axis: it
 carries the **x values** and they must parse as numbers (`parse_scatter_x_values`), because both axes are numeric and
 the series need `c:xVal`. That is also why scatter takes `XyChartData` rather than `CategoryChartData` — the type was
@@ -196,8 +203,24 @@ the slides' inventory from `deck_review.slide_outline` (element index, kind, tex
 text that exists but is covered from text that was never there. `deck_review.py` adds one text-only coherence call
 over the whole deck's outline (agenda vs. section dividers, content on the wrong slide, blank slides, contradictions)
 — the defects an orchestrator actually ships are an off-by-one `slide_index`, not a layout bug, and no per-slide
-review sees them. It runs on whole-deck calls only (an agenda cannot be checked against two slides), re-runs every
-round, and a failed coherence call degrades to the visual review rather than failing QA. **`passed` is ours**: no
+review sees them. It runs on whole-deck calls only (an agenda cannot be checked against two slides), once per call (again only after a
+reorder), and a failed coherence call degrades to the visual review rather than failing QA. **Its findings never reach
+the repair planner** (`AUTHOR_CHECKS`): handed agenda or misplaced-content issues, the planner "fixed" them by rewriting
+content — an agenda cut to one line, headlines replaced by labels — so they go back as `action_required`, one entry per
+finding. The same holds for `layout_space.py`'s measured empty space: vision reviewers reliably miss half-empty slides,
+so each round's renders are measured (ink cells in the layout-derived content frame, dilated by a margin; the largest
+ink-free rectangle above `VISUAL_QA_EMPTY_THRESHOLD` is a blocking `empty` issue carrying `empty_region_in`), and only
+the author can fill that space. A round that adds a critical issue to a slide is rolled back whatever else it improved.
+Icons get two checks of their own. `add_icon_to_slide` names each picture `Icon: <concept>` (and sets its alt text), so
+the outline can show every icon's concept beside the text it illustrates (`layout_space.icon_context`) and both
+reviewers can catch a shield drawn on an EBITDA figure — a meaning fault only the author can fix by rendering another
+icon. Placement is geometric (`icon_placement_issues`, check `geometry`, planner-actionable): an icon crossing the edge
+of the card, bar or panel it sits on, or leaving the content frame, is reported with a concrete target — a text-free
+spot inside the container at full size, else the card's text moved down to make room, else a smaller icon — because
+the planner follows explicit coordinates far better than "align the icon". Keep the rename: without it an icon is
+only a "small square picture" to these checks.
+`set_text`/`set_cell_text` go through `replace_text_keeping_format`, because `text_frame.text =` drops the runs'
+formatting and turned white-on-blue card text into white-on-white. **`passed` is ours**: no
 blocking issue left, never the model's flag — which it sets beside critical findings. A whole deck beyond
 `VISION_LLM_MAX_SLIDES` reports `slides_not_reviewed` and is not cleared. The repair ops now include
 `move_shape_to_slide`, `reorder_slides` (applied last; returns `slides_reordered` so the loop restarts its scope),

@@ -29,6 +29,8 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE, PP_PLACEHOLDER
 from pptx.oxml.ns import qn
 from pptx.util import Emu
 
+import layout_space
+
 
 # Per-slide and per-element text budgets: enough for the reviewer to recognise
 # what a slide is about, bounded so a 60-slide deck stays a modest prompt.
@@ -135,9 +137,19 @@ def _kind(shape):
     return "shape"
 
 
+# Where the OUTLINE shortens long text. An ellipsis here read to the reviewers
+# as the slide's own text being cut off, and they reported "truncated" text
+# that no repair could fix, because it was never truncated on the slide.
+CLIP_MARKER = " [outline clipped; the slide has the full text]"
+CLIP_NOTE = (
+    "\nNote: \"[outline clipped; the slide has the full text]\" marks where "
+    "this outline shortens long text to save space. It is not on the slide: "
+    "never report it as truncated, cut-off or unfinished text.")
+
+
 def _clip(text, limit):
     text = " / ".join(line.strip() for line in text.splitlines() if line.strip())
-    return text if len(text) <= limit else text[:limit] + "…"
+    return text if len(text) <= limit else text[:limit] + CLIP_MARKER
 
 
 def _group_text(group):
@@ -166,6 +178,14 @@ def _chart_summary(chart):
         info["categories"] = [str(c)[:30] for c in chart.plots[0].categories][:12]
     except Exception:
         pass
+    try:
+        # Without the values a text-only reviewer sees a chart with names and
+        # no numbers and reports it as empty, critical.
+        info["values"] = {str(s.name): [None if v is None else round(v, 4)
+                                        for v in s.values][:12]
+                          for s in chart.series[:8]}
+    except Exception:
+        pass
     return info
 
 
@@ -190,7 +210,18 @@ def slide_outline(pres, slide_numbers=None):
         title, elements, body, budget = None, [], 0, SLIDE_TEXT_CHARS
         for index, shape in enumerate(shapes):
             kind = _kind(shape)
+            concept = layout_space.icon_concept(shape)
+            if concept is not None:
+                kind = "icon"
             entry = {"shape_index": index, "kind": kind}
+            if concept is not None:
+                # What the icon was drawn to mean, and what it sits beside:
+                # the pair a reviewer needs to catch a shield on an EBITDA
+                # figure.
+                entry["icon_concept"] = concept[:60]
+                context = layout_space.icon_context(slide, index)
+                if context:
+                    entry["illustrates"] = _clip(context, 120)
             is_title = is_furniture = False
             if shape.is_placeholder:
                 try:
@@ -234,7 +265,8 @@ def slide_outline(pres, slide_numbers=None):
                 entry["role"] = "furniture"
             elif text.strip() and _is_footnote(shape, slide_height):
                 entry["role"] = "footnote"
-            elif text.strip() or kind in ("picture", "chart", "table", "group"):
+            elif text.strip() or kind in ("picture", "icon", "chart", "table",
+                                          "group"):
                 body += 1
             elements.append(entry)
         outline.append({
@@ -296,6 +328,13 @@ typed bullet characters or numbering duplicated inside text ("• •", "1. 1.")
 literal markup or escape sequences ("\\\\n", "**", "&amp;"), mojibake \
 ("â€™") or missing-glyph boxes.
 
+9. Icons. Each "icon" element names the concept it was drawn for \
+("icon_concept") and the text it sits in or beside ("illustrates"). Report an \
+icon whose concept has nothing to do with that text (a shield on an EBITDA \
+figure, a target on a completed deal, a heart on a margin), and one icon \
+drawn for two unrelated meanings on the same slide (major, category \
+"icon"; say which concept would fit, e.g. "a euro/growth icon").
+
 Severity: "critical" when a slide would be presented wrong (blank, \
 misplaced or hidden content, agenda promising what the deck does not \
 deliver); "major" for anything an audience would notice (contradictory \
@@ -306,7 +345,7 @@ Respond with ONLY a JSON object, no markdown fence:
 {{"passed": true|false, "issues": [{{"slide": <1-based number>, "severity": \
 "critical"|"major"|"minor", "category": "agenda"|"misplaced_content"|\
 "empty_slide"|"hidden_content"|"duplicate"|"contradiction"|"order"|"title"|\
-"text_quality", "element": "<shape_index(es) or element name>", \
+"text_quality"|"icon", "element": "<shape_index(es) or element name>", \
 "related_slides": [<1-based numbers>], "description": "...", \
 "suggested_fix": "..."}}]}}
 In "suggested_fix" be concrete: the exact corrected agenda text, which \
@@ -318,5 +357,6 @@ major issues."""
 
 def coherence_prompt(outline):
     return COHERENCE_PROMPT.format(
-        outline=json.dumps(outline, ensure_ascii=False, separators=(",", ":")))
+        outline=json.dumps(outline, ensure_ascii=False,
+                           separators=(",", ":"))) + CLIP_NOTE
 

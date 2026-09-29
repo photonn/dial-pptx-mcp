@@ -52,7 +52,9 @@ indexes are the 0-based positions reported by describe_slides, and always refer
 to the slide as it was described — a delete earlier in the same plan does not
 shift the index of a later operation's target.
 """
+import copy
 import json
+import os
 import logging
 import math
 import re
@@ -70,6 +72,20 @@ logger = get_logger("visual_fix")
 
 MAX_TEXT_CHARS = 4000
 FONT_PT_RANGE = (6, 96)
+# The smallest size a repair may set. Shrinking is the planner's cheapest way
+# to make any text fit, and left alone it set a wrapping source line to 8pt —
+# below every brand minimum and what reviewers call illegible. Below this the
+# fix is a shorter text or a bigger box, which the planner must pick instead.
+DEFAULT_MIN_FONT_PT = 10
+
+
+def min_font_pt():
+    try:
+        return max(FONT_PT_RANGE[0], min(
+            FONT_PT_RANGE[1],
+            float(os.environ.get("VISUAL_QA_MIN_FONT_PT", DEFAULT_MIN_FONT_PT))))
+    except ValueError:
+        return DEFAULT_MIN_FONT_PT
 POSITION_IN_RANGE = (-5.0, 60.0)
 SIZE_IN_RANGE = (0.05, 60.0)
 # A repair may not shrink a chart, table, picture or group below this share
@@ -155,7 +171,7 @@ def estimate_fit_font_size(shape, min_pt=None, max_pt=None):
         return None
     lo = int(min_pt if min_pt is not None else FONT_PT_RANGE[0])
     hi = int(max_pt if max_pt is not None else FONT_PT_RANGE[1])
-    lo = max(lo, FONT_PT_RANGE[0])
+    lo = max(lo, FONT_PT_RANGE[0], int(math.ceil(min_font_pt())))
     hi = min(hi, FONT_PT_RANGE[1])
     if hi < lo:
         return None
@@ -402,6 +418,11 @@ slide that is empty because its content was never built, a missing chart, a \
 figure that needs checking: put it in "author_actions" with exactly what is \
 missing, and plan no operation for it.
 
+Never set text below {min_font_pt} pt: when text does not fit at that size, \
+widen or heighten its box (moving neighbours if needed) or shorten it with \
+set_text (keeping its meaning). A one-line footer or source line that wraps \
+is fixed by widening its box, not by shrinking it.
+
 Size text to the space it has. Text should fill its box comfortably — neither \
 overflowing it nor floating in a mostly empty one — while the slide as a whole \
 keeps its breathing room. Use fit_text (optionally bounded with min_pt/max_pt) \
@@ -421,6 +442,16 @@ boxes in the structure above: a fix that lands on another element is a new \
 overlap. Change only what an issue names — a slide with no issue listed is \
 not yours to rearrange.
 
+Icons (pictures named "Icon: ..."): fix icon placement by moving the icon, \
+not the text. Inside a card, keep it at least 0.12in from every card edge. \
+Beside a label, centre it vertically on the label's text block: \
+top = label_top + (label_height - icon_size) / 2 — for a one-line title use \
+the title line. In a row of cards give every icon the same offset from its \
+card. An issue that carries a target position in its suggested_fix: use \
+exactly that position. An icon whose picture does not fit its text cannot be \
+redrawn here: delete it only if the card still reads well without it, \
+otherwise leave it to the author.
+
 For text that is not in a text box, use the operation that matches the \
 container. Table columns too narrow for their text: widen the column (and \
 narrow another so the table still fits) or shrink the table font. Table rows \
@@ -439,6 +470,38 @@ chart the category axis runs vertically and the value axis horizontally; on a \
 column or line chart it is the other way round. Read the current titles in the \
 structure above (category_axis_title / value_axis_title) and the image before \
 deciding a title belongs on the other axis."""
+
+
+def replace_text_keeping_format(text_frame, text):
+    """Set a text frame's text, keeping the look of its first paragraph and run.
+
+    python-pptx's ``text_frame.text = ...`` drops every run with its a:rPr, so
+    the new text falls back to the inherited style: on a card that set its own
+    white bold text on a blue fill, the rewrite came out dark-on-blue or
+    white-on-white — a new critical issue created by a repair. Each new line
+    becomes a paragraph carrying copies of the first paragraph's a:pPr (level,
+    alignment, bullet) and the first run's a:rPr (font, size, colour, bold)."""
+    ppr = rpr = None
+    for para in text_frame.paragraphs:
+        if ppr is None and para._p.pPr is not None:
+            ppr = copy.deepcopy(para._p.pPr)
+        for run in para.runs:
+            if run._r.rPr is not None:
+                rpr = copy.deepcopy(run._r.rPr)
+                break
+        if rpr is not None:
+            break
+    text_frame.text = text
+    for para in text_frame.paragraphs:
+        if ppr is not None:
+            if para._p.pPr is not None:
+                para._p.remove(para._p.pPr)
+            para._p.insert(0, copy.deepcopy(ppr))
+        if rpr is not None:
+            for run in para.runs:
+                if run._r.rPr is not None:
+                    run._r.remove(run._r.rPr)
+                run._r.insert(0, copy.deepcopy(rpr))
 
 
 def plan_repairs(llm, issues, pres, deck_images, image_slides=None,
@@ -471,6 +534,7 @@ def plan_repairs(llm, issues, pres, deck_images, image_slides=None,
         slide_count=len(pres.slides),
         width_in=_emu_to_in(pres.slide_width),
         height_in=_emu_to_in(pres.slide_height),
+        min_font_pt=f"{min_font_pt():g}",
     )
     if image_slides is None:
         image_slides = list(range(1, len(deck_images) + 1))
@@ -683,6 +747,11 @@ def apply_repairs(pres, operations, allowed_slides=None):
                 if not _in_range(op.get("size_pt"), FONT_PT_RANGE):
                     skipped.append({"op": op, "reason": "font size out of range"})
                     continue
+                if op["size_pt"] < min_font_pt():
+                    skipped.append({"op": op, "reason": "below minimum font "
+                                    "size — shorten the text or enlarge its "
+                                    "box instead"})
+                    continue
                 size = Pt(op["size_pt"])
                 if shape.has_text_frame:
                     for para in shape.text_frame.paragraphs:
@@ -711,7 +780,7 @@ def apply_repairs(pres, operations, allowed_slides=None):
                 if not shape.has_text_frame:
                     skipped.append({"op": op, "reason": "shape has no text frame"})
                     continue
-                shape.text_frame.text = text
+                replace_text_keeping_format(shape.text_frame, text)
             elif kind == "set_word_wrap":
                 if not shape.has_text_frame:
                     skipped.append({"op": op, "reason": "shape has no text frame"})
@@ -786,7 +855,8 @@ def apply_repairs(pres, operations, allowed_slides=None):
                     if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
                         skipped.append({"op": op, "reason": "bad text"})
                         continue
-                    table.cell(row_idx, col).text_frame.text = text
+                    replace_text_keeping_format(
+                        table.cell(row_idx, col).text_frame, text)
             elif kind in ("set_chart_legend", "set_chart_data_labels"):
                 if not getattr(shape, "has_chart", False):
                     skipped.append({"op": op, "reason": "shape is not a chart"})

@@ -4,7 +4,7 @@ Functions for slides, text, images, tables, charts, and shapes.
 """
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData, XyChartData
-from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
+from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_LEGEND_POSITION
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -557,6 +557,10 @@ def add_chart(slide, chart_type: str, left: float, top: float, width: float, hei
     return chart
 
 
+_OUTSIDE_END_LABEL_TYPES = frozenset({
+    XL_CHART_TYPE.COLUMN_CLUSTERED, XL_CHART_TYPE.BAR_CLUSTERED})
+
+
 def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
                 has_data_labels: bool = False, title: str = None,
                 x_axis_title: str = None, y_axis_title: str = None,
@@ -594,10 +598,17 @@ def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
                 chart.legend.position = position
             chart.legend.include_in_layout = False
         
-        # Configure data labels
+        # Configure data labels. The flag lives on the plot (the chart
+        # group), not the series: setting series.has_data_labels raised an
+        # AttributeError that the blanket except below swallowed, so labels
+        # were silently never shown.
         if has_data_labels:
-            for series in chart.series:
-                series.has_data_labels = True
+            for plot in chart.plots:
+                plot.has_data_labels = True
+                labels = plot.data_labels
+                labels.show_value = True
+                if chart.chart_type in _OUTSIDE_END_LABEL_TYPES:
+                    labels.position = XL_LABEL_POSITION.OUTSIDE_END
         
         # Set axis titles if available
         try:
@@ -610,6 +621,48 @@ def format_chart(chart, has_legend: bool = True, legend_position: str = 'right',
             
     except Exception:
         pass  # Graceful degradation for chart formatting
+
+
+_ZERO_BASED_CHARTS = frozenset({'column', 'stacked_column', 'bar',
+                                 'stacked_bar', 'area', 'stacked_area'})
+
+
+def style_chart_values(chart, chart_type: str, series_values,
+                       font_size: int = None, number_format: str = None,
+                       value_axis_min: float = None,
+                       show_value_axis: bool = True,
+                       show_gridlines: bool = True) -> None:
+    """Value-axis and label settings add_chart applies after format_chart.
+
+    A length-encoded chart (bar, column, area) whose axis does not start at
+    zero misstates every ratio, and both renderers auto-scale one: a 4,059 vs
+    4,296 column pair came out with its axis at 3,900. So those charts start
+    at 0 whenever their data is non-negative, unless the caller names a
+    minimum. Line charts keep auto-scaling — a trend line is read by slope."""
+    kind = (chart_type or '').lower()
+    if font_size:
+        chart.font.size = Pt(font_size)
+    if number_format and chart.plots:
+        for plot in chart.plots:
+            if plot.has_data_labels:
+                labels = plot.data_labels
+                labels.number_format = number_format
+                labels.number_format_is_linked = False
+    try:
+        axis = chart.value_axis
+    except (ValueError, AttributeError):
+        return  # pie / doughnut: no value axis
+    if value_axis_min is not None:
+        axis.minimum_scale = value_axis_min
+    elif kind in _ZERO_BASED_CHARTS:
+        values = [v for series in series_values for v in series
+                  if v is not None]
+        if values and min(values) >= 0:
+            axis.minimum_scale = 0
+    if not show_gridlines:
+        axis.has_major_gridlines = False
+    if not show_value_axis:
+        axis.visible = False
 
 
 def extract_slide_text_content(slide) -> Dict:

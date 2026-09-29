@@ -57,9 +57,15 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `VISION_LLM_MAX_SLIDES` | no | `60` | Most slides one whole-deck review covers. Slides beyond it come back in `slides_not_reviewed` and the deck is not marked `passed` (an explicit `slides` list is never capped) |
 | `VISION_LLM_BATCH_SLIDES` | no | `6` | Slides per vision request. A deck is reviewed in batches of this size, run in parallel; one request carrying 15+ slides is where the reviewer started missing blank slides |
 | `VISION_LLM_MAX_PARALLEL` | no | `4` | Vision requests in flight at once for one review (the coherence call counts as one) |
+| `VISION_LLM_TIMEOUT_S` | no | `120` | Per-request timeout for vision calls, in seconds |
+| `VISION_LLM_RETRIES` | no | `2` | Retries for a vision request that times out or gets 429/5xx |
 | `VISUAL_QA_COHERENCE` | no | `true` | Whole-deck calls also run the deck-level story review (agenda vs. sections, content on the wrong slide, blank slides, contradictions) — one text-only call. `false` turns it off |
 | `VISUAL_QA_ENFORCE` | no | `true` | `false` unregisters the visual QA tools entirely. It governs slide inspection only — `render_svg_icon` still reviews an icon whenever a vision model is configured |
 | `VISUAL_QA_MAX_ITERATIONS` | no | `3` | Inspect/repair rounds per `visual_repair_slides` call (overridable per call) |
+| `VISUAL_QA_EMPTY_CHECK` | no | `true` | Measure unused space on each rendered content slide and report a blocking `empty` issue (with the region in inches, in `action_required`) when the largest unused area exceeds `VISUAL_QA_EMPTY_THRESHOLD` |
+| `VISUAL_QA_EMPTY_THRESHOLD` | no | `0.10` | Share of the content frame the largest unused rectangle may take before it is reported |
+| `VISUAL_QA_MIN_FONT_PT` | no | `10` | Smallest font size a visual repair may set; text that does not fit at that size is shortened or its box enlarged instead |
+| `VISUAL_QA_CONTENT_FRAME` | no | derived | Content frame for the empty-space check as `left,top,right,bottom` inches; by default it runs from the title (and subline) to the footer band, inside the title's side margins |
 | `VISUAL_QA_EXPORT_GATE` | no | `false` | `true` also runs a whole-deck inspect-repair loop inside export/save and refuses unverified decks |
 | `VISUAL_QA_ON_UNRESOLVED` | no | `report` | Export gate only: `report` fails the export with the issue list, `export_as_is` ships the deck |
 | `VISUAL_QA_ON_ERROR` | no | `block` | Export gate only: `allow` exports when inspection itself cannot run |

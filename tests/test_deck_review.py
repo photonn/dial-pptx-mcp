@@ -244,26 +244,24 @@ class TestCoherenceInTheLoop(EnvCase):
                     "issues": [dict(i) for i in verdict["issues"]]}
         return fake_review, calls
 
-    def test_misplaced_content_is_moved_and_the_deck_passes(self):
+    def test_story_findings_go_to_the_author_not_the_planner(self):
+        """The planner "fixed" story findings by rewriting content (agenda
+        cut to one line, headlines replaced by labels); they come back as
+        action_required instead, and the story is reviewed once."""
         pres = titled_deck(["Agenda", "Section", "Scale, focus, launch"])
-        card = pres.slides[1].shapes.add_shape(
-            MSO_SHAPE.RECTANGLE, Inches(1), Inches(2), Inches(3), Inches(2))
-        card.text_frame.text = "SCALE"
-        card_index = len(pres.slides[1].shapes) - 1
         misplaced = {"slide": 2, "severity": "critical",
                      "category": "misplaced_content", "related_slides": [3],
-                     "description": "cards belong on slide 3"}
+                     "description": "cards belong on slide 3",
+                     "suggested_fix": "move the cards to slide 3"}
         fake_review, calls = self._script(
             visual=[{"passed": True, "issues": []}],
-            coherence=[{"passed": False, "issues": [misplaced]},
-                       {"passed": True, "issues": []}])
-        planned = {}
+            coherence=[{"passed": False, "issues": [misplaced]}])
+        planned = []
 
         def fake_plan(llm, issues, pres_, images, image_slides=None,
                       author_actions=None):
-            planned["issues"] = issues
-            return [{"op": "move_shape_to_slide", "slide": 2,
-                     "shape_index": card_index, "target_slide": 3}]
+            planned.append(issues)
+            return []
 
         with patch.object(visual_qa, "_render_deck",
                           side_effect=lambda p, m=None, slides=None:
@@ -271,13 +269,15 @@ class TestCoherenceInTheLoop(EnvCase):
              patch.object(visual_qa.VisionLLM, "review", fake_review), \
              patch.object(visual_fix, "plan_repairs", fake_plan):
             outcome = visual_qa.inspect_and_repair(pres)
-        self.assertTrue(outcome["passed"])
-        self.assertEqual(planned["issues"][0]["check"], "coherence")
+        self.assertFalse(outcome["passed"])
+        self.assertEqual(planned, [])
         self.assertEqual(outcome["checks"], ["visual", "coherence"])
-        self.assertEqual(outcome["repair_rounds"][0]["changes"],
-                         [f"slide 2 #{card_index} move_shape_to_slide -> slide 3"])
-        self.assertEqual(pres.slides[2].shapes[-1].text_frame.text, "SCALE")
-        self.assertEqual(calls["coherence"], 2)  # re-checked after the move
+        self.assertEqual(outcome["action_required"],
+                         [{"slide": 2, "check": "coherence",
+                           "problem": "cards belong on slide 3",
+                           "action": "move the cards to slide 3",
+                           "related_slides": [3]}])
+        self.assertEqual(calls["coherence"], 1)
 
     def test_missing_content_comes_back_as_an_author_action(self):
         pres = titled_deck(["Agenda", "Revenue", "Costs"])
@@ -287,18 +287,13 @@ class TestCoherenceInTheLoop(EnvCase):
             visual=[{"passed": True, "issues": []}],
             coherence=[{"passed": False, "issues": [empty]}])
 
-        def fake_plan(llm, issues, pres_, images, image_slides=None,
-                      author_actions=None):
-            author_actions.append({"slide": 3, "action": "build the cost chart"})
-            return []
-
         with patch.object(visual_qa, "_render_deck", return_value=[b"png"] * 3), \
-             patch.object(visual_qa.VisionLLM, "review", fake_review), \
-             patch.object(visual_fix, "plan_repairs", fake_plan):
+             patch.object(visual_qa.VisionLLM, "review", fake_review):
             outcome = visual_qa.inspect_and_repair(pres)
         self.assertFalse(outcome["passed"])
         self.assertEqual(outcome["action_required"],
-                         [{"slide": 3, "action": "build the cost chart"}])
+                         [{"slide": 3, "check": "coherence", "problem": "blank",
+                           "action": "add the cost chart"}])
         self.assertEqual(outcome["issues"][0]["category"], "empty_slide")
 
     def test_a_failed_coherence_call_degrades_to_the_visual_review(self):

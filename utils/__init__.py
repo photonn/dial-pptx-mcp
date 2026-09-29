@@ -65,6 +65,7 @@ __all__ = [
     "add_chart",
     "format_chart",
     "normalize_chart_defaults",
+    "style_chart_values",
     "SCATTER_CHART_TYPES",
     "parse_scatter_x_values",
     

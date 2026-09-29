@@ -39,6 +39,7 @@ from pptx import Presentation
 
 import deck_review
 import fonts
+import layout_space
 from logging_utils import get_logger, flatten
 
 logger = get_logger("visual_qa")
@@ -248,7 +249,12 @@ slide — is critical. Say what the content is about and which title it would fi
    - Placeholder prompts ("Click to add title/text"), sample or template text, \
 "Lorem ipsum", "TBD", "XXX", "[insert …]", empty picture or chart frames.
    - Large unexplained empty regions, or content crammed into one corner while \
-the rest of the slide stays empty.
+the rest of the slide stays empty (major).
+   - Sparse containers: cards, tiles, panels or boxes whose content fills less \
+than about half of them — two lines of text at the top of a tall card, a big \
+coloured panel holding one short sentence (major, category "empty"; suggest \
+shrinking the container to its content, or what to add: an icon, a key figure, \
+a second fact).
 2. Hidden, covered or stray content.
    - Text from the inventory that is not visible: covered by a shape, card or \
 picture, placed off the slide, same colour as its background, or shrunk to \
@@ -297,6 +303,13 @@ lines, a leading blank line, numbering that restarts or skips.
 "Category 1", an axis title that says nothing.
    - A chart whose form does not fit its data (one bar, a pie with one slice, \
 a single point on a line), or whose scale hides the differences it is meant to show.
+   - A bar, column or area chart whose value axis does not start at zero: it \
+exaggerates every difference (major).
+   - Series of different units or very different magnitude sharing one value \
+axis (revenue beside profit, € beside %): the small series looks negligible \
+(major; suggest splitting into two charts or a secondary axis).
+   - Numbers the audience needs but cannot read: a chart with neither data \
+labels nor a readable value axis.
    - KPI or stat cards whose numbers are cut, misaligned or visually unrelated \
 to their labels.
 7. Pictures and icons.
@@ -304,6 +317,16 @@ to their labels.
 heads or text), a broken-image placeholder.
    - Icons inconsistent in style, colour or size across a row, or unreadable \
 against their background.
+   - An icon whose picture has nothing to do with the text it sits beside (the \
+inventory says what each icon was drawn as and what it is beside), or the same \
+icon used for unrelated meanings on one slide (major; say what it should show).
+   - Icon and text misaligned inside their card: the icon not vertically \
+centred on the text block (or first line) it accompanies, touching or \
+overlapping the text, or sitting at a different position in each card of a \
+row; an icon crossing the edge of its card, bar or panel (major; name the \
+icon's shape_index and the position it should move to).
+   - Icons on some cards of a row and not on the others (major; say which \
+cards lack one — the author adds them or removes the odd one out).
 8. Layout, alignment and consistency.
    - Elements off the slide edge, crossing the template's header rule, logo or \
 footer zone, or covering template artwork.
@@ -499,15 +522,48 @@ class VisionLLM:
                 "raw_review": text,
                 "note": "Reviewer response was not valid JSON; see raw_review."}
 
-    def ask(self, images: list, prompt: str, timeout: float = 300.0) -> str:
-        """Send prompt + images, return the model's raw text answer."""
+    def ask(self, images: list, prompt: str, timeout: float = None) -> str:
+        """Send prompt + images, return the model's raw text answer.
+
+        A request that times out or meets a 429/5xx is retried
+        (VISION_LLM_RETRIES, default 2) with a fresh per-request timeout
+        (VISION_LLM_TIMEOUT_S, default 120). Healthy requests finish in
+        5-30s; the ones that do not have hung, and one hung request used to
+        fail a whole-deck QA call after five minutes, discarding every round
+        that had already finished."""
         url, headers = self._request_target()
         payload = self.build_payload(images, prompt)
+        if timeout is None:
+            timeout = _env_float("VISION_LLM_TIMEOUT_S", 120.0)
+        retries = _env_int("VISION_LLM_RETRIES", 2, minimum=0)
         logger.debug("vision_request provider=%s model=%s images=%d "
                      "prompt_chars=%d timeout_s=%.0f",
                      self.provider, self.model, len(images), len(prompt), timeout)
         started = time.monotonic()
-        r = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        for attempt in range(retries + 1):
+            try:
+                r = httpx.post(url, headers=headers, json=payload,
+                               timeout=timeout)
+            except httpx.TransportError as e:
+                # Timeouts and dropped connections ("connection reset by
+                # peer") alike: transient, and worth one more try.
+                logger.warning("vision_request_transport_error attempt=%d/%d "
+                               "timeout_s=%.0f error=%s", attempt + 1,
+                               retries + 1, timeout, type(e).__name__)
+                if attempt == retries:
+                    raise VisualQAError(
+                        f"Vision LLM request failed {retries + 1} times "
+                        f"({type(e).__name__}; timeout {timeout:.0f}s each).")
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                wait = min(30.0, _retry_after(r, 5.0 * (attempt + 1)))
+                logger.warning("vision_request_retry status=%d attempt=%d/%d "
+                               "wait_s=%.0f", r.status_code, attempt + 1,
+                               retries + 1, wait)
+                time.sleep(wait)
+                continue
+            break
         duration_ms = int((time.monotonic() - started) * 1000)
         if r.status_code != 200:
             detail = r.text[:300]
@@ -526,10 +582,10 @@ class VisionLLM:
                      "chars=%d", self.provider, self.model, duration_ms, len(text))
         return text
 
-    def review(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+    def review(self, images: list, prompt: str, timeout: float = None) -> dict:
         return self.parse_verdict(self.ask(images, prompt, timeout))
 
-    def ask_json(self, images: list, prompt: str, timeout: float = 300.0) -> dict:
+    def ask_json(self, images: list, prompt: str, timeout: float = None) -> dict:
         """Like ask(), parsed as a JSON object ({} when unparseable)."""
         text = self.ask(images, prompt, timeout)
         candidate = text.strip()
@@ -705,6 +761,22 @@ def _env_int(name, default, minimum=1):
         return default
 
 
+def _env_float(name, default):
+    try:
+        return max(1.0, float(os.environ.get(name, default)))
+    except ValueError:
+        logger.warning("config_invalid var=%s value=%s using=%s", name,
+                       os.environ.get(name), default)
+        return default
+
+
+def _retry_after(response, default):
+    try:
+        return float(response.headers.get("retry-after", default))
+    except (TypeError, ValueError):
+        return default
+
+
 def _slide_cap():
     """Most slides one whole-deck review covers. Slides beyond it are reported
     back as not reviewed — never silently treated as passed."""
@@ -860,7 +932,10 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
         llm, pres, deck_images, image_slides, focus,
         fonts.unreliable_fonts_in(pres), ref_images,
         coherence=_coherence_applies(pres, slides))
-    issues = visual["issues"] + (coherence["issues"] if coherence else [])
+    issues = (visual["issues"]
+              + layout_space.empty_space_issues(pres, deck_images, image_slides)
+              + layout_space.icon_placement_issues(pres, image_slides)
+              + (coherence["issues"] if coherence else []))
     verdict = {
         "passed": None if visual["passed"] is None
         else not blocking_issues(issues),
@@ -885,6 +960,13 @@ def inspect_presentation(pres, reference_pres=None, focus: str = None,
 # them is what turned one-round fixes into ten-round loops. An issue with no
 # (or an unknown) severity counts as blocking, so nothing slips through.
 NON_BLOCKING_SEVERITIES = {"minor"}
+# Findings the repair planner is never given: its operations move, resize and
+# restyle what exists, and handed these it "fixed" them by rewriting content —
+# an agenda cut to one line, message headlines replaced by labels, card copy
+# lifted from another slide. The story review's findings (agenda, duplicates,
+# misplaced or missing content) and measured empty space need the author, so
+# they go back as action_required, one instruction per finding.
+AUTHOR_CHECKS = {"coherence", "layout"}
 # Cap on minor findings echoed back: they are for the record, not for action.
 MAX_MINOR_REPORTED = 20
 
@@ -949,6 +1031,10 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
     # coherence review is one cheap text call and re-runs every round:
     # a move or an agenda rewrite changes the story on several slides.
     review_scope = initial_scope
+    # The story review runs once per call (and again after a reorder): the
+    # planner never acts on its findings, so between rounds nothing it
+    # describes has changed.
+    rerun_coherence = use_coherence
     # The latest accepted verdict per slide. A slide keeps its issues until
     # it is reviewed again, which is how a blocking issue on a slide no
     # operation reached stays unresolved without being re-inspected.
@@ -964,18 +1050,25 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
         # Absolute slide number of each image, so issues and repairs address
         # deck positions even when only a subset was rendered.
         image_slides = review_scope or list(range(1, len(deck_images) + 1))
+        run_coherence, rerun_coherence = rerun_coherence, False
         visual, coherence = _review(llm, pres, deck_images, image_slides,
                                     focus, risky_fonts,
-                                    coherence=use_coherence)
-        # Report the story review as run only when it produced a verdict.
-        checks = ["visual"] + (["coherence"] if coherence else [])
+                                    coherence=run_coherence)
+        if run_coherence:
+            # Report the story review as run only when it produced a verdict.
+            checks = ["visual"] + (["coherence"] if coherence else [])
+        layout_issues = (
+            layout_space.empty_space_issues(pres, deck_images, image_slides)
+            + layout_space.icon_placement_issues(pres, image_slides))
         new_visual = {n: [] for n in image_slides}
-        for issue in visual["issues"]:
+        for issue in visual["issues"] + layout_issues:
             if not slides or issue.get("slide") in slides:
                 new_visual.setdefault(issue.get("slide"), []).append(issue)
         new_state = {"visual": new_visual,
                      "images": dict(zip(image_slides, deck_images)),
-                     "coherence": coherence["issues"] if coherence else []}
+                     "coherence": ((coherence["issues"] if coherence else [])
+                                   if run_coherence
+                                   else list(coherence_issues))}
         reverted = []
         if pending:
             reverted, stop = _judge_round(pres, pending, new_state, slides)
@@ -993,11 +1086,13 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
 
         found = _all_issues(visual_by_slide, coherence_issues)
         issues = blocking_issues(found)
-        # What this round can act on: slides it just reviewed (and did not
-        # just roll back — that fix was tried) plus the deck's story.
-        actionable = [i for i in issues if i.get("check") == "coherence"
-                      or (i.get("slide") in image_slides
-                          and i.get("slide") not in reverted)]
+        # What this round can act on: visual findings on slides it just
+        # reviewed (and did not just roll back — that fix was tried). The
+        # story and empty-space findings are the author's (AUTHOR_CHECKS).
+        actionable = [i for i in issues
+                      if i.get("check") not in AUTHOR_CHECKS
+                      and i.get("slide") in image_slides
+                      and i.get("slide") not in reverted]
         logger.info("qa_round iteration=%d/%d slides=%d issues=%d blocking=%d "
                     "actionable=%d reverted=%d coherence_issues=%s "
                     "duration_ms=%d", iteration, max_iterations,
@@ -1072,6 +1167,7 @@ def inspect_and_repair(pres, slides: list = None, focus: str = None,
             # still points at the right slide, so start over on the whole scope.
             images_by_slide, visual_by_slide = {}, {}
             review_scope = initial_scope
+            rerun_coherence = use_coherence
         else:
             review_scope = pending["touched"]
 
@@ -1129,6 +1225,14 @@ def _slide_scores(issues):
     return scores
 
 
+def _critical_counts(issues):
+    counts = {}
+    for issue in issues:
+        if str(issue.get("severity", "")).lower() == "critical":
+            counts[issue.get("slide")] = counts.get(issue.get("slide"), 0) + 1
+    return counts
+
+
 def _deck_bytes(pres):
     buf = io.BytesIO()
     pres.save(buf)
@@ -1182,8 +1286,15 @@ def _judge_round(pres, pending, new_state, slides):
                        len(pending["applied"]))
         return [], True
 
+    crit_before = _critical_counts(_all_issues(pending["visual"],
+                                               pending["coherence"]))
+    crit_after = _critical_counts(_all_issues(new_state["visual"],
+                                              new_state["coherence"]))
+    # A new critical issue is a regression whatever else improved: two major
+    # issues traded for white-on-white text used to score as progress.
     reverted = {n for n in pending["touched"]
-                if after.get(n, 0) > before.get(n, 0)}
+                if after.get(n, 0) > before.get(n, 0)
+                or crit_after.get(n, 0) > crit_before.get(n, 0)}
     if not reverted:
         return [], False
     applied = pending["applied"]
@@ -1239,7 +1350,17 @@ def _outcome(passed, iterations, repair_rounds, remaining, found, reviewed,
         covered = {a.get("slide") for a in author_actions}
         actions = list(author_actions)
         for issue in remaining:
-            if issue.get("slide") not in covered:
+            if issue.get("check") in AUTHOR_CHECKS:
+                action = {"slide": issue.get("slide"),
+                          "check": issue.get("check"),
+                          "problem": issue.get("description"),
+                          "action": issue.get("suggested_fix")
+                          or issue.get("description")}
+                for key in ("related_slides", "empty_region_in"):
+                    if issue.get(key):
+                        action[key] = issue[key]
+                actions.append(action)
+            elif issue.get("slide") not in covered:
                 covered.add(issue.get("slide"))
                 actions.append({"slide": issue.get("slide"),
                                 "action": issue.get("suggested_fix")
@@ -1265,9 +1386,16 @@ def _inventory_text(entry):
             continue
         desc = f"#{element['shape_index']} {element['kind']}"
         if element.get("text"):
-            desc += f": {element['text'][:160]!r}"
+            text = element["text"]
+            if len(text) > 160:
+                text = text[:160] + deck_review.CLIP_MARKER
+            desc += f": {text!r}"
         elif element.get("empty"):
             desc += " (empty)"
+        if element.get("icon_concept"):
+            desc += f" drawn as {element['icon_concept']!r}"
+            if element.get("illustrates"):
+                desc += f", beside {element['illustrates']!r}"
         if element.get("chart"):
             desc += f" {json.dumps(element['chart'], ensure_ascii=False)[:160]}"
         if element.get("drawn_over_by"):
@@ -1299,7 +1427,8 @@ def review_prompt(has_reference: bool, focus: str = None,
     if inventory:
         prompt += ("\n\nWhat each slide's file contains (shape_index, kind, "
                    "text), to compare with what the image shows:\n"
-                   + "\n".join(_inventory_text(e) for e in inventory))
+                   + "\n".join(_inventory_text(e) for e in inventory)
+                   + deck_review.CLIP_NOTE)
     prompt += fonts.qa_font_caveat(risky_fonts)
     if focus:
         prompt += (f"\nAdditional focus requested by the caller (on top of, "

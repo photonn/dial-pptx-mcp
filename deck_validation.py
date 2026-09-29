@@ -33,6 +33,7 @@ import re
 import zipfile
 
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx.oxml.ns import qn
 
@@ -272,10 +273,28 @@ def _iter_text(shape):
                     yield cell.text_frame.text
 
 
+def _is_line(shape):
+    """Connectors and line autoshapes (a:prstGeom prst="line") are drawn along
+    their extent, so a zero width or height is a vertical or horizontal line."""
+    if shape.shape_type == MSO_SHAPE_TYPE.LINE or \
+            shape._element.tag.endswith("}cxnSp"):
+        return True
+    geom = shape._element.find(".//" + qn("a:prstGeom"))
+    return geom is not None and geom.get("prst") in (
+        "line", "straightConnector1", "bentConnector2", "bentConnector3",
+        "curvedConnector3")
+
+
 def _check_geometry(slide_index, shape_index, shape, width, height, report):
     if shape.width is None or shape.height is None:
         return
-    if shape.width <= 0 or shape.height <= 0:
+    # A straight horizontal or vertical line has a zero extent on one axis by
+    # construction; only a line collapsed on both axes is degenerate.
+    if _is_line(shape):
+        degenerate = shape.width <= 0 and shape.height <= 0
+    else:
+        degenerate = shape.width <= 0 or shape.height <= 0
+    if degenerate:
         report.add(ERROR, "zero_sized_shape",
                    f"Slide {slide_index}, shape {shape_index} "
                    f"('{shape.name}') has a zero or negative size.",
