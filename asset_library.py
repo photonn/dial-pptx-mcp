@@ -49,10 +49,20 @@ def list_assets(query=None):
     """Sorted image file names in the library, optionally filtered by a
     case-insensitive substring."""
     directory = _require_dir()
+    try:
+        entries = os.listdir(directory)
+    except OSError as e:
+        logger.warning("asset_dir_unreadable path=%s error=%s", directory, e)
+        raise AssetError("The asset library cannot be read on this server "
+                         "right now. Draw the icon with render_svg_icon "
+                         "instead.")
+    # Symlinks are skipped: isfile() follows them, and a link would let a
+    # name resolve to a file outside the library folder.
     names = sorted(
-        name for name in os.listdir(directory)
+        name for name in entries
         if not name.startswith(".")
         and name.lower().endswith(IMAGE_EXTENSIONS)
+        and not os.path.islink(os.path.join(directory, name))
         and os.path.isfile(os.path.join(directory, name))
     )
     if query:

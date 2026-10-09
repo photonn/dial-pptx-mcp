@@ -170,7 +170,7 @@ Some pictures belong to the deployment rather than to a user: a brand's icon set
 
 | Tool | What it does |
 |---|---|
-| `list_assets(query?)` | Sorted image names in the library (`.png`, `.jpg`, `.jpeg`, `.gif`; hidden files, folders and other files are ignored), optionally narrowed by a case-insensitive substring |
+| `list_assets(query?)` | Sorted image names in the library (`.png`, `.jpg`, `.jpeg`, `.gif`; hidden files, symlinks, folders and other files are ignored), optionally narrowed by a case-insensitive substring |
 | `add_asset_to_slide(presentation_id, slide_index, name, left?, top?, width?, height?, fit?)` | Places one entry, with the same geometry and `fit` modes as `add_image_from_dial_url` (`contain` by default; give a square box for an icon) |
 
 The agent passes a **name**, never a path: a name must be a bare file name that `list_assets` returns, so `../`, absolute paths and sub-folders are refused and the tool cannot read anything else on the pod. `DIAL_IMAGE_MAX_MB` bounds the file size here too. The folder is read on every call, so replacing its contents takes effect without a restart.
