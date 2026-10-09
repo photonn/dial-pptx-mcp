@@ -33,9 +33,11 @@ class AssetToolTestCase(unittest.TestCase):
             with open(os.path.join(self.library, name), "w") as fh:
                 fh.write("{}")
         os.mkdir(os.path.join(self.library, "nested.png"))
-        # Outside the library, next to it.
+        # Outside the library, next to it — and a link pointing at it.
         with open(os.path.join(self.tmp.name, "secret.png"), "wb") as fh:
             fh.write(png_bytes(10, 10))
+        os.symlink(os.path.join(self.tmp.name, "secret.png"),
+                   os.path.join(self.library, "linked.png"))
         os.environ["PPT_ASSET_PATH"] = self.library
 
         self.store = PresentationStore(ttl_seconds=60, max_items=10)
@@ -85,6 +87,15 @@ class TestListAssets(AssetToolTestCase):
         os.environ.pop("PPT_ASSET_PATH")
         self.assertIn("PPT_ASSET_PATH", self.list_assets()["error"])
 
+    def test_symlinks_are_not_listed(self):
+        self.assertNotIn("linked.png", self.list_assets()["assets"])
+
+    def test_unreadable_folder_is_an_error_not_a_crash(self):
+        from unittest.mock import patch
+        with patch("asset_library.os.listdir", side_effect=PermissionError("denied")):
+            self.assertIn("cannot be read", self.list_assets()["error"])
+            self.assertIn("cannot be read", self.add()["error"])
+
     def test_missing_folder_is_an_error_not_a_crash(self):
         os.environ["PPT_ASSET_PATH"] = os.path.join(self.tmp.name, "gone")
         self.assertIn("not available", self.list_assets()["error"])
@@ -111,6 +122,7 @@ class TestAddAsset(AssetToolTestCase):
 
     def test_paths_are_refused(self):
         for name in ("../secret.png", os.path.join(self.tmp.name, "secret.png"),
+                     "linked.png",
                      "nested.png/x.png", ".DS_Store", "manifest.json",
                      "nested.png", ""):
             with self.subTest(name=name):
