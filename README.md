@@ -14,6 +14,7 @@ This project extends [GongRzhe/Office-PowerPoint-MCP-Server](https://github.com/
 | State | process globals, guessable sequential IDs | per-deck UUID handles (unguessable), thread-safe store with TTL + LRU bounds, per-deck locking |
 | File I/O | local disk paths | DIAL Files API: template in via Quick Apps `file:data::` references, deck out via `export_presentation` returning a DIAL file URL |
 | Images | local path or base64 | `add_image_from_dial_url` fetches orchestrator-generated images from DIAL storage server-side, with aspect-ratio-aware placement |
+| Asset library | none | `list_assets` + `add_asset_to_slide`: brand icons and other pictures mounted into the pod (`PPT_ASSET_PATH`), placed by name with the same aspect-ratio-aware fitting — no DIAL file sharing needed |
 | Icons | none | `render_svg_icon` + `add_icon_to_slide`: the agent draws the icon as SVG (`get_icon_guidance` holds the style guide), the server rasterizes it to a transparent PNG, has the vision model check the render for artifacts, and holds it under a handle for placement |
 | Deck structure | append-only (`add_slide` at the end) | `duplicate_slide`, `delete_slide`, `move_slide`, `copy_slide_between_presentations`, and `manage_shape` (delete, move, restack, move an element to another slide) — python-pptx has no API for any of these |
 | Speaker notes | none | `manage_speaker_notes`, carried across duplication, reported by the text-extraction tools |
@@ -49,6 +50,7 @@ All environment-specific settings come from environment variables. Nothing is ha
 | `PPT_MCP_MAX_CONCURRENT_TOOL_CALLS` | no | `max(4, 2x CPU count)` | Max tool calls running at once, process-wide (see [Multi-tenancy and scaling notes](#multi-tenancy-and-scaling-notes)). Bounds a burst of parallel tool calls (many tenants, or several `render_svg_icon` calls in one agent turn) so the pod's CPU can't be flooded |
 | `PPT_MCP_MAX_CONCURRENT_CONVERSIONS` | no | `2` | Max LibreOffice conversions running at once, process-wide. These are the memory-heavy calls (~0.5 GB per `soffice` process), so they are capped separately from `PPT_MCP_MAX_CONCURRENT_TOOL_CALLS`; calls above the cap queue rather than fail. Raise it only with pod memory to match |
 | `PPT_TEMPLATE_PATH` | no | — | Extra local directories searched by the local-path template tools (`:`-separated) |
+| `PPT_ASSET_PATH` | no | — | Folder holding the server-side asset library (PNG/JPEG/GIF) served by `list_assets` and `add_asset_to_slide`. Unset → both tools return an error telling the agent to draw the icon instead. See [Asset library](#asset-library-server-side-images) |
 | `VISION_LLM_MODEL` | for visual QA | — | Vision model: the model name (direct endpoint) or the DIAL deployment name (DIAL provider); must accept image input |
 | `VISION_LLM_ENDPOINT` | direct provider | — | OpenAI Responses-API endpoint, e.g. `https://<resource>.openai.azure.com/openai/responses?api-version=2025-04-01-preview`. When unset, the model is called through DIAL Core instead: `{DIAL_CORE_URL}/openai/deployments/{model}/chat/completions` with DIAL credentials (caller headers first, `DIAL_API_KEY` fallback) |
 | `VISION_LLM_API_KEY` | direct provider | — | Key for the direct endpoint (sent as `api-key` and `Authorization: Bearer`) |
@@ -161,6 +163,21 @@ Two consequences worth knowing. **Pass the URL exactly as received, in that para
 **What counts as an image URL.** A DIAL file reference: the `files/{bucket}/{path}` URL an upload returns, or the full https URL of that file on this DIAL installation — the `.../api/files/{bucket}/{path}` link an image deployment hands back is accepted as-is, as is the Core API's `/v1/files/...` form. Arbitrary web URLs are refused: this server is not a web fetcher, and an agent that finds a picture online must store it in DIAL file storage before inserting it. If your file links carry a different hostname than `DIAL_CORE_URL` (public chat host vs. in-cluster service), list it in `DIAL_PUBLIC_URL`.
 
 Generated images are in scope for `visual_repair_slides` like any other shape. `DIAL_IMAGE_MAX_MB` (default 20) bounds what the server will download; non-raster input is refused with a message telling the agent to ask its image model for PNG or JPEG rather than SVG.
+
+## Asset library (server-side images)
+
+Some pictures belong to the deployment rather than to a user: a brand's icon set, a logo variant. Attaching them to every Quick App means every file has to be shared with every user who runs it. Instead, mount them into the pod and point `PPT_ASSET_PATH` at the folder.
+
+| Tool | What it does |
+|---|---|
+| `list_assets(query?)` | Sorted image names in the library (`.png`, `.jpg`, `.jpeg`, `.gif`; hidden files, folders and other files are ignored), optionally narrowed by a case-insensitive substring |
+| `add_asset_to_slide(presentation_id, slide_index, name, left?, top?, width?, height?, fit?)` | Places one entry, with the same geometry and `fit` modes as `add_image_from_dial_url` (`contain` by default; give a square box for an icon) |
+
+The agent passes a **name**, never a path: a name must be a bare file name that `list_assets` returns, so `../`, absolute paths and sub-folders are refused and the tool cannot read anything else on the pod. `DIAL_IMAGE_MAX_MB` bounds the file size here too. The folder is read on every call, so replacing its contents takes effect without a restart.
+
+Name the files so a query by concept finds them — e.g. `brand_icon_<concept>_<variant>.png` — and tell the agent the naming scheme and when to use each variant in its system prompt.
+
+A template on disk works the same way: put `deck.pptx` and its instructions sidecar `deck.md` in a `PPT_TEMPLATE_PATH` folder and the agent loads both with `create_presentation_from_template("deck.pptx")`. On Linux the sidecar name is case-sensitive.
 
 ## Icons (agent-drawn SVG)
 
