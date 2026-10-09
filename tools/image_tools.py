@@ -8,6 +8,10 @@ server-side with the caller's own DIAL credentials, so a multi-megabyte PNG
 never travels through the agent's context window (which is what
 `manage_image(source_type="base64")` costs).
 
+Pictures the operator ships with the deployment (brand icons) come from the
+asset library instead (`asset_library.py`, `PPT_ASSET_PATH`): listed with
+`list_assets`, placed by name with `add_asset_to_slide`.
+
 Placement is aspect-ratio aware by default: `fit="contain"` scales the
 picture into the box you give it and centres it there, so the visual QA pass
 never has to report distortion it cannot repair.
@@ -109,8 +113,82 @@ def _place(pic, left, top, box_w, box_h, fit, slide_w, slide_h):
     return "contain"
 
 
+def _check_args(presentations, presentation_id, slide_index, fit, left, top,
+                width, height):
+    """Validate the arguments both placement tools share; an error dict or
+    None."""
+    if presentation_id not in presentations:
+        return {"error": UNKNOWN_ID}
+    pres = presentations[presentation_id]
+    if slide_index < 0 or slide_index >= len(pres.slides):
+        return {"error": f"Invalid slide index: {slide_index}. Available "
+                         f"slides: 0-{len(pres.slides) - 1}"}
+    if fit not in FIT_MODES:
+        return {"error": f"Invalid fit: {fit}. Must be one of "
+                         f"{', '.join(FIT_MODES)}."}
+    if left < 0 or top < 0:
+        return {"error": "left and top must be zero or positive inches."}
+    for name, value in (("width", width), ("height", height)):
+        if value is not None and value <= 0:
+            return {"error": f"{name} must be a positive number of inches."}
+    return None
+
+
+def _insert(pres, presentation_id, slide_index, data, left, top, width,
+            height, fit, too_large_hint, source):
+    """Embed image bytes on a slide and fit them to the requested box."""
+    limit = _max_bytes()
+    if len(data) > limit:
+        logger.warning("image_too_large presentation_id=%s source=%s bytes=%d "
+                       "limit=%d", short_id(presentation_id), source,
+                       len(data), limit)
+        return {"error": f"Image is {len(data) / 1048576:.1f} MB, over the "
+                         f"{limit / 1048576:.1f} MB limit. {too_large_hint}"}
+
+    slide = pres.slides[slide_index]
+    try:
+        pic = slide.shapes.add_picture(io.BytesIO(data), Inches(left),
+                                       Inches(top))
+    except Exception as e:
+        logger.error("image_insert_failed presentation_id=%s slide=%d "
+                     "source=%s reason=%s error=%s", short_id(presentation_id),
+                     slide_index, source, type(e).__name__, e)
+        return {"error": f"The file is not an image PowerPoint can embed "
+                         f"({str(e)}). PNG, JPEG, GIF, BMP and TIFF work; SVG "
+                         f"does not — ask the image model for a raster "
+                         f"format."}
+
+    native = {"width_px": pic.image.size[0], "height_px": pic.image.size[1]}
+    applied = _place(
+        pic,
+        int(Inches(left)), int(Inches(top)),
+        int(Inches(width)) if width is not None else None,
+        int(Inches(height)) if height is not None else None,
+        fit,
+        int(pres.slide_width), int(pres.slide_height),
+    )
+
+    logger.info("image_added presentation_id=%s slide=%d source=%s bytes=%d "
+                "fit=%s", short_id(presentation_id), slide_index, source,
+                len(data), applied)
+    return {
+        "message": f"Added image to slide {slide_index} ({applied}).",
+        "shape_index": len(slide.shapes) - 1,
+        "fit": applied,
+        "native": native,
+        "placed": {
+            "left": _inches(pic.left),
+            "top": _inches(pic.top),
+            "width": _inches(pic.width),
+            "height": _inches(pic.height),
+        },
+        "size_bytes": len(data),
+    }
+
+
 def register_image_tools(app: FastMCP, presentations):
-    """Register the DIAL-hosted image tools with the FastMCP app."""
+    """Register the DIAL-hosted and asset-library image tools with the
+    FastMCP app."""
 
     @app.tool(
         annotations=ToolAnnotations(
@@ -161,21 +239,10 @@ def register_image_tools(app: FastMCP, presentations):
         """
         from dial_client import DialFileClient, DialConfigError
 
-        if presentation_id not in presentations:
-            return {"error": UNKNOWN_ID}
-        pres = presentations[presentation_id]
-
-        if slide_index < 0 or slide_index >= len(pres.slides):
-            return {"error": f"Invalid slide index: {slide_index}. Available "
-                             f"slides: 0-{len(pres.slides) - 1}"}
-        if fit not in FIT_MODES:
-            return {"error": f"Invalid fit: {fit}. Must be one of "
-                             f"{', '.join(FIT_MODES)}."}
-        if left < 0 or top < 0:
-            return {"error": "left and top must be zero or positive inches."}
-        for name, value in (("width", width), ("height", height)):
-            if value is not None and value <= 0:
-                return {"error": f"{name} must be a positive number of inches."}
+        refusal = _check_args(presentations, presentation_id, slide_index,
+                              fit, left, top, width, height)
+        if refusal is not None:
+            return refusal
 
         try:
             data = DialFileClient().download(image_url)
@@ -193,50 +260,89 @@ def register_image_tools(app: FastMCP, presentations):
                              f"files/{{bucket}}/{{path}}, and check the file "
                              f"still exists."}
 
-        limit = _max_bytes()
-        if len(data) > limit:
-            logger.warning("image_too_large presentation_id=%s bytes=%d "
-                           "limit=%d", short_id(presentation_id), len(data),
-                           limit)
-            return {"error": f"Image is {len(data) / 1048576:.1f} MB, over the "
-                             f"{limit / 1048576:.1f} MB limit. Generate or "
-                             f"store a smaller image."}
+        return _insert(presentations[presentation_id], presentation_id,
+                       slide_index, data, left, top, width, height, fit,
+                       too_large_hint="Generate or store a smaller image.",
+                       source="dial")
 
-        slide = pres.slides[slide_index]
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="List Library Assets",
+            readOnlyHint=True,
+        ),
+    )
+    def list_assets(query: Optional[str] = None) -> Dict:
+        """List the images in this server's asset library (brand icons and
+        other pictures the operator ships with the deployment).
+
+        query: optional case-insensitive substring to narrow the list, e.g.
+        "email" or "_blue". Names usually encode the concept and variant, so
+        a query by concept is the quickest way to find a match.
+
+        Place an entry with add_asset_to_slide, passing the name exactly as
+        returned here. Never construct a name yourself.
+        """
+        import asset_library
+
         try:
-            pic = slide.shapes.add_picture(io.BytesIO(data), Inches(left),
-                                           Inches(top))
-        except Exception as e:
-            logger.error("image_insert_failed presentation_id=%s slide=%d "
-                         "reason=%s error=%s", short_id(presentation_id),
-                         slide_index, type(e).__name__, e)
-            return {"error": f"The downloaded file is not an image PowerPoint "
-                             f"can embed ({str(e)}). PNG, JPEG, GIF, BMP and "
-                             f"TIFF work; SVG does not — ask the image model "
-                             f"for a raster format."}
+            names = asset_library.list_assets(query)
+        except asset_library.AssetError as e:
+            return {"error": str(e)}
+        result = {"assets": names, "count": len(names)}
+        if not names and query:
+            result["note"] = (f"Nothing matches '{query}'. Call list_assets "
+                              "without a query to see every name, or draw the "
+                              "icon with render_svg_icon.")
+        return result
 
-        native = {"width_px": pic.image.size[0], "height_px": pic.image.size[1]}
-        applied = _place(
-            pic,
-            int(Inches(left)), int(Inches(top)),
-            int(Inches(width)) if width is not None else None,
-            int(Inches(height)) if height is not None else None,
-            fit,
-            int(pres.slide_width), int(pres.slide_height),
-        )
+    @app.tool(
+        annotations=ToolAnnotations(
+            title="Add Library Asset to Slide",
+        ),
+    )
+    def add_asset_to_slide(
+        presentation_id: str,
+        slide_index: int,
+        name: str,
+        left: float = 1.0,
+        top: float = 1.0,
+        width: Optional[float] = None,
+        height: Optional[float] = None,
+        fit: str = "contain",
+    ) -> Dict:
+        """Place an image from this server's asset library onto a slide.
 
-        logger.info("image_added presentation_id=%s slide=%d bytes=%d fit=%s",
-                    short_id(presentation_id), slide_index, len(data), applied)
-        return {
-            "message": f"Added image to slide {slide_index} ({applied}).",
-            "shape_index": len(slide.shapes) - 1,
-            "fit": applied,
-            "native": native,
-            "placed": {
-                "left": _inches(pic.left),
-                "top": _inches(pic.top),
-                "width": _inches(pic.width),
-                "height": _inches(pic.height),
-            },
-            "size_bytes": len(data),
-        }
+        name: an asset name exactly as list_assets returned it.
+        slide_index, left, top, width, height and fit work exactly as in
+        add_image_from_dial_url: 0-based slide_index, inches, and
+        fit="contain" (default) keeps the picture undistorted inside the box.
+        For an icon, give a square box (width == height).
+
+        Returns the shape index and the geometry actually applied ("placed").
+        """
+        import asset_library
+
+        refusal = _check_args(presentations, presentation_id, slide_index,
+                              fit, left, top, width, height)
+        if refusal is not None:
+            return refusal
+        try:
+            path = asset_library.resolve(name)
+            with open(path, "rb") as fh:
+                data = fh.read(_max_bytes() + 1)
+        except asset_library.AssetError as e:
+            return {"error": str(e)}
+        except OSError as e:
+            logger.error("asset_read_failed presentation_id=%s name=%s "
+                         "error=%s", short_id(presentation_id), name, e)
+            return {"error": f"The asset '{name}' could not be read on the "
+                             f"server ({e}). Draw the icon with "
+                             f"render_svg_icon instead."}
+
+        result = _insert(presentations[presentation_id], presentation_id,
+                         slide_index, data, left, top, width, height, fit,
+                         too_large_hint="Pick a different asset.",
+                         source="asset")
+        if "error" not in result:
+            result["asset"] = name
+        return result
